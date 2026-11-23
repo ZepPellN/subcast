@@ -18,8 +18,7 @@ function activeIndex(segments: Segment[], time: number): number {
   return found;
 }
 
-/** Why this episode can't be played here, if it can't: a file only the computer has, or a video. */
-type Blocked = "offline" | "video" | "none" | null;
+type Blocked = "offline" | "video" | "http" | "none" | null;
 
 function degradeText(reason: Exclude<Blocked, null>): { title: string; hint: string } {
   switch (reason) {
@@ -30,6 +29,11 @@ function degradeText(reason: Exclude<Blocked, null>): { title: string; hint: str
       };
     case "video":
       return { title: t("请在电脑上播放"), hint: t("这是视频单集，手机版只播放音频。") };
+    case "http":
+      return {
+        title: t("这期只有 HTTP 音频链接"),
+        hint: t("HTTPS 手机访问只能播放 HTTPS 音频直链。你仍可查看字幕和使用问答。"),
+      };
     default:
       return { title: t("这期没有可播放的音频"), hint: t("电脑上也没有找到这一集的音频地址。") };
   }
@@ -37,7 +41,7 @@ function degradeText(reason: Exclude<Blocked, null>): { title: string; hint: str
 
 interface Props {
   episodeId: string;
-  /** 401 from the gateway: forget this phone and pair again. */
+  /** A rejected device token requires pairing again. */
   onUnauthorized: () => void;
   onBack: () => void;
 }
@@ -158,6 +162,12 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
 
   const blocked: Blocked = useMemo(() => {
     if (!episode) return null;
+    if (episode.audioUrl && location.protocol === "https:") {
+      let protocol;
+      try { protocol = new URL(episode.audioUrl).protocol; } catch { /* only absolute source URLs */ }
+      if (protocol === "http:") return "http";
+      if (protocol !== "https:") return hints?.offline ? "offline" : "none";
+    }
     // 下载过的音频是电脑上的本地文件；按 issue #3 的验收，手机端明确禁用播放并说明原因。
     if (hints?.offline) return "offline";
     if (episode.audioUrl) return null;

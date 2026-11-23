@@ -1853,6 +1853,12 @@ const dict: Record<string, string> = {
   "使用 Cloudflare Tunnel 和 Access。将 Tunnel 的来源设为 {origin}。": "Use Cloudflare Tunnel and Access. Set the Tunnel origin to {origin}.",
   "允许手机通过 HTTPS 访问": "Allow phone access over HTTPS",
   "在手机浏览器打开 HTTPS 地址，登录 Access 后输入配对码。": "Open the HTTPS address in your phone browser, sign in to Access and enter the pairing code.",
+  "需要登录 Cloudflare Access": "Cloudflare Access sign-in required",
+  "刷新页面以继续。已有设备配对和待同步进度会保留。": "Reload to continue. Your device pairing and unsynced progress will be kept.",
+  "刷新并登录": "Reload and sign in",
+  "连不上电脑，请确认电脑上的 HTTPS 手机访问和 Tunnel 均已开启。": "Can't reach the computer. Check that HTTPS phone access and the tunnel are running.",
+  "这期只有 HTTP 音频链接": "This episode only has an HTTP audio link",
+  "HTTPS 手机访问只能播放 HTTPS 音频直链。你仍可查看字幕和使用问答。": "HTTPS phone access can only play direct HTTPS audio links. Subtitles and episode questions are still available.",
 };
 
 export default dict;
