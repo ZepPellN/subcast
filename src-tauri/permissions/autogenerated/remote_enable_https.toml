@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-enable-https"
+description = "Enables the remote_enable_https command without any pre-configured scope."
+commands.allow = ["remote_enable_https"]
+
+[[permission]]
+identifier = "deny-remote-enable-https"
+description = "Denies the remote_enable_https command without any pre-configured scope."
+commands.deny = ["remote_enable_https"]

@@ -1,6 +1,7 @@
 import { invoke as desktopInvoke } from "@tauri-apps/api/core";
 import { listen as desktopListen, type UnlistenFn } from "@tauri-apps/api/event";
 import { tr } from "./i18n";
+import { AccessRequired, phoneFetch } from "./phoneFetch";
 import type { Aligned, TimeMap } from "./timemap";
 
 // ---- transport ----------------------------------------------------------------------------------------
@@ -37,7 +38,7 @@ const desktopTransport: Transport = {
 const phoneTransport: Transport = {
   async call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
     const token = deviceToken();
-    const res = await fetch(`/rpc/${encodeURIComponent(command)}`, {
+    const res = await phoneFetch(`/rpc/${encodeURIComponent(command)}`, {
       method: "POST",
       referrerPolicy: "same-origin",
       keepalive: command === "set_progress" || command === "set_watched",
@@ -61,7 +62,13 @@ export const transport: Transport = IS_DESKTOP ? desktopTransport : phoneTranspo
 const invoke = <T>(command: string, args?: Record<string, unknown>) => transport.call<T>(command, args);
 
 /** One address the phone can open. `kind` is translated in the UI. */
-export interface RemoteUrl { kind: "lan" | "tailscale" | "loopback"; url: string }
+export interface RemoteUrl { kind: "lan" | "tailscale" | "loopback" | "https"; url: string }
+export interface RemoteHttpsConfig {
+  publicUrl: string;
+  teamName: string;
+  audience: string;
+  email: string;
+}
 export interface RemoteStatus {
   enabled: boolean;
   port: number;
@@ -84,8 +91,11 @@ export class PairError extends Error { constructor(public reason: PairFailure) {
 export async function pairDevice(code: string): Promise<void> {
   let res: Response;
   try {
-    res = await fetch("/pair", { method: "POST", referrerPolicy: "same-origin", headers: { "Content-Type": "application/json", "X-Subcast-Client": "phone" }, body: JSON.stringify({ code, name: deviceName() }) });
-  } catch { throw new PairError("network"); }
+    res = await phoneFetch("/pair", { method: "POST", referrerPolicy: "same-origin", headers: { "Content-Type": "application/json", "X-Subcast-Client": "phone" }, body: JSON.stringify({ code, name: deviceName() }) });
+  } catch (e) {
+    if (e instanceof AccessRequired) throw e;
+    throw new PairError("network");
+  }
   if (res.ok) {
     const body = (await res.json()) as { token?: string };
     if (body.token) { setDeviceToken(body.token); return; }
@@ -227,9 +237,8 @@ export const api = {
   getEpisode: (id: string) => invoke<Episode | null>("get_episode", { id }),
   removeShow: (id: string, keepEpisodeId?: string) => invoke<void>("remove_show", { id, keepEpisodeId }),
   setProgress: (id: string, seconds: number) => invoke<void>("set_progress", { id, seconds }),
-  savePhoneProgress: (id: string, seconds: number, playing: boolean, ageMs: number) =>
-    invoke<boolean>("set_progress", { id, seconds, playing, ageMs }),
-  finishPhoneEpisode: (id: string, ageMs: number) => invoke<boolean>("set_watched", { id, watched: "done", ageMs }),
+  savePhoneProgress: (id: string, seconds: number, playing: boolean, ageMs: number, finished: boolean) =>
+    invoke<boolean>("set_progress", { id, seconds, playing, ageMs, finished }),
   setWatched: (id: string, watched: "done" | "unseen" | null) => invoke<void>("set_watched", { id, watched }),
   markShowWatched: (showId: string) => invoke<number>("mark_show_watched", { showId }),
   searchShow: (showId: string, query: string) => invoke<ShowHit[]>("search_show", { showId, query }),
@@ -324,6 +333,8 @@ export const api = {
   remoteStatus: () => invoke<RemoteStatus>("remote_status"),
   /** 打开手机访问（额外的局域网监听 + 新配对码）。 */
   enableRemote: () => invoke<RemoteStatus>("remote_enable"),
+  remoteHttpsConfig: () => invoke<RemoteHttpsConfig | null>("remote_https_config"),
+  enableRemoteHttps: (config: RemoteHttpsConfig) => invoke<RemoteStatus>("remote_enable_https", { config }),
   /** 关闭手机访问：停止监听并吊销全部令牌。 */
   disableRemote: () => invoke<RemoteStatus>("remote_disable"),
   /** 重新生成配对码。 */

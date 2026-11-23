@@ -186,17 +186,17 @@ pub fn set_audio_url(conn: &Connection, id: &str, url: &str) -> Result<()> {
 }
 
 pub fn set_progress(conn: &Connection, id: &str, seconds: f64) -> Result<()> {
-    write_progress(conn, id, seconds, now_ms())?;
+    write_progress(conn, id, seconds, now_ms(), false)?;
     Ok(())
 }
 
 /// A delayed phone write must not replace a position saved more recently on the desktop.
-pub fn write_progress(conn: &Connection, id: &str, seconds: f64, updated_at: i64) -> Result<bool> {
+pub fn write_progress(conn: &Connection, id: &str, seconds: f64, updated_at: i64, finished: bool) -> Result<bool> {
     let count = conn.execute(
         "UPDATE episodes SET progress=?2, progress_updated_at=?3,
-         watched_override = CASE WHEN watched_override = 'unseen' AND ?2 > 5.0 THEN NULL ELSE watched_override END
+         watched_override = CASE WHEN ?4 THEN 'done' WHEN watched_override = 'unseen' AND ?2 > 5.0 THEN NULL ELSE watched_override END
          WHERE id=?1 AND progress_updated_at <= ?3",
-        params![id, seconds.max(0.0), updated_at],
+        params![id, seconds.max(0.0), updated_at, finished],
     )?;
     Ok(count > 0)
 }
@@ -399,14 +399,18 @@ mod tests {
     fn queued_phone_progress_cannot_move_a_newer_desktop_position_back() {
         let conn = open(Path::new(":memory:")).unwrap();
         conn.execute("INSERT INTO episodes(id, show_id, guid, title) VALUES ('e1','s1','g1','Episode')", []).unwrap();
-        assert!(write_progress(&conn, "e1", 80.0, 2000).unwrap());
-        assert!(!write_progress(&conn, "e1", 40.0, 1000).unwrap());
+        assert!(write_progress(&conn, "e1", 80.0, 2000, false).unwrap());
+        assert!(!write_progress(&conn, "e1", 40.0, 1000, true).unwrap());
         assert!(!write_watched(&conn, "e1", Some("done"), 1000).unwrap());
         let episode = get_episode(&conn, "e1").unwrap().unwrap();
         assert_eq!(episode.progress, 80.0);
         assert_eq!(episode.watched_override, None);
-        assert!(write_progress(&conn, "e1", 30.0, 3000).unwrap(), "an intentional seek can move back");
+        assert!(write_progress(&conn, "e1", 30.0, 3000, false).unwrap(), "an intentional seek can move back");
         assert_eq!(get_episode(&conn, "e1").unwrap().unwrap().progress, 30.0);
+        assert!(write_progress(&conn, "e1", 99.0, 4000, true).unwrap());
+        let finished = get_episode(&conn, "e1").unwrap().unwrap();
+        assert_eq!(finished.progress, 99.0);
+        assert_eq!(finished.watched_override.as_deref(), Some("done"));
     }
 
     #[test]

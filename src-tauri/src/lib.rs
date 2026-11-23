@@ -22,6 +22,7 @@ mod shadow;
 mod ota;
 mod qiaomu;
 mod remote;
+mod remote_access;
 mod remote_events;
 mod shared;
 mod speech;
@@ -870,7 +871,8 @@ impl remote::Commands for AppCommands {
                 let seconds = args.get("seconds").and_then(Value::as_f64).ok_or_else(bad_args)?;
                 if !seconds.is_finite() || seconds < 0.0 { return Err(bad_args()); }
                 let age = args.get("ageMs").and_then(Value::as_i64).unwrap_or(0).clamp(0, remote::TOKEN_TTL_MS);
-                let applied = db::write_progress(&state.db.lock().unwrap(), id, seconds, now_ms() - age).map_err(e)?;
+                let finished = args.get("finished").and_then(Value::as_bool).unwrap_or(false);
+                let applied = db::write_progress(&state.db.lock().unwrap(), id, seconds, now_ms() - age, finished).map_err(e)?;
                 Ok(json!(applied))
             }
             // issue #4：已看状态。只接受 done / unseen / null，别的取值一律不写。
@@ -910,7 +912,7 @@ fn serve_ui(app: &AppHandle, active: ota::Active) -> u16 {
         let Ok(server) = tiny_http::Server::from_listener(listener, None) else { continue };
         let server = Arc::new(server);
         let (gateway, files, commands) = (gateway.clone(), files.clone(), commands.clone());
-        std::thread::spawn(move || remote::serve(server, Arc::new(AtomicBool::new(false)), gateway, files, commands));
+        std::thread::spawn(move || remote::serve(server, Arc::new(AtomicBool::new(false)), gateway, files, commands, None));
     }
     port
 }
@@ -931,8 +933,7 @@ fn remote_enable(app: AppHandle) -> Res<remote::Status> {
     let files: Arc<dyn remote::Files> = Arc::new(UiFiles { app: app.clone(), active: ui_active() });
     let commands: Arc<dyn remote::Commands> = Arc::new(AppCommands(app.clone()));
     let state = app.state::<AppState>();
-    remote::remote().gw.open_device_store(&state.data.join("subcast.db")).map_err(e)?;
-    let status = remote::remote().enable(ui_port(), UI_PORTS, targets, files, commands);
+    let status = remote::remote().enable(ui_port(), UI_PORTS, targets, files, commands, Some(&state.data.join("subcast.db"))).map_err(e)?;
     if !status.enabled { return Err("界面端口被占用，手机访问没有打开".into()); }
     static WATCH_ADDRESSES: OnceLock<()> = OnceLock::new();
     WATCH_ADDRESSES.get_or_init(|| {
@@ -947,6 +948,29 @@ fn remote_enable(app: AppHandle) -> Res<remote::Status> {
             }
         });
     });
+    let _ = app.emit("remote-enabled", true);
+    Ok(status)
+}
+
+/// The HTTPS configuration is desktop-only; no cloud credentials are stored.
+const ACCESS_SETTINGS_KEY: &str = "phone-https";
+
+#[tauri::command(async)]
+fn remote_https_config(state: State<'_, AppState>) -> Res<Option<remote_access::AccessSettings>> {
+    let stored = db::get_setting(&state.db.lock().unwrap(), ACCESS_SETTINGS_KEY).map_err(e)?;
+    Ok(stored.and_then(|raw| serde_json::from_str(&raw).ok()))
+}
+
+#[tauri::command]
+async fn remote_enable_https(app: AppHandle, config: remote_access::AccessSettings) -> Res<remote::Status> {
+    let access = remote_access::AccessVerifier::prepare(config).await?;
+    let saved = serde_json::to_string(access.settings()).map_err(e)?;
+    let state = app.state::<AppState>();
+    db::set_setting(&state.db.lock().unwrap(), ACCESS_SETTINGS_KEY, &saved).map_err(e)?;
+    let files: Arc<dyn remote::Files> = Arc::new(UiFiles { app: app.clone(), active: ui_active() });
+    let commands: Arc<dyn remote::Commands> = Arc::new(AppCommands(app.clone()));
+    let status = remote::remote().enable_https(remote_access::ORIGIN_PORT, access, files, commands,
+        Some(&state.data.join("phone-https-devices.db")))?;
     let _ = app.emit("remote-enabled", true);
     Ok(status)
 }
@@ -1907,7 +1931,7 @@ pub fn run() {
             shadow_start, shadow_stop, shadow_clear, shadow_ready, shadow_hear, open_mic_settings,
             download_episode, list_downloads, delete_download, clear_downloads, align_audio, save_time_map, list_audio_cache, clear_audio_cache, storage_info, open_data_folder, reveal_download, clear_temp, full_notes, tts_synthesize, tts_system_voices, clear_tts_cache, local_tts_status, local_tts_install, local_tts_delete,
             video_clip_env, video_clip_warm, video_clip_prepare, video_clip_render, reveal_file,
-            remote_status, remote_enable, remote_disable, remote_regenerate, remote_revoke
+            remote_status, remote_enable, remote_disable, remote_regenerate, remote_revoke, remote_https_config, remote_enable_https
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
