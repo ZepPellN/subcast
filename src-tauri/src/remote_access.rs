@@ -99,12 +99,10 @@ pub struct AccessVerifier {
 impl AccessVerifier {
     pub async fn prepare(settings: AccessSettings) -> Result<Arc<Self>, &'static str> {
         let policy = Policy::from_settings(settings).ok_or("invalid_access_config")?;
-        let client = Client::builder().redirect(redirect::Policy::none()).timeout(Duration::from_secs(8))
-            .build().map_err(|_| "access_keys_unavailable")?;
         let url = format!("{}/cdn-cgi/access/certs", policy.issuer);
-        let keys = Self::fetch_keys(&client, &url).await.ok_or("access_keys_unavailable")?;
+        let keys = Self::fetch_keys(&url).await.ok_or("access_keys_unavailable")?;
         let verifier = Arc::new(Self { policy, keys: RwLock::new(keys), refresh: Arc::new(Notify::new()) });
-        verifier.refresh_keys(client, url);
+        verifier.refresh_keys(url);
         Ok(verifier)
     }
 
@@ -138,8 +136,15 @@ impl AccessVerifier {
             .then_some(result.exp)
     }
 
-    async fn fetch_keys(client: &Client, url: &str) -> Option<CachedKeys> {
-        let mut response = client.get(url).send().await.ok()?;
+    async fn fetch_keys(url: &str) -> Option<CachedKeys> {
+        let mut builder = Client::builder()
+            .redirect(redirect::Policy::none())
+            .timeout(Duration::from_secs(8));
+        let proxy = crate::net::proxy();
+        if !proxy.is_empty() {
+            builder = builder.proxy(reqwest::Proxy::all(proxy).ok()?);
+        }
+        let mut response = builder.build().ok()?.get(url).send().await.ok()?;
         if !response.status().is_success() { return None; }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.ok()? {
@@ -149,7 +154,7 @@ impl AccessVerifier {
         CachedKeys::new(serde_json::from_slice(&bytes).ok()?)
     }
 
-    fn refresh_keys(self: &Arc<Self>, client: Client, url: String) {
+    fn refresh_keys(self: &Arc<Self>, url: String) {
         let verifier = Arc::downgrade(self);
         let refresh = self.refresh.clone();
         tauri::async_runtime::spawn(async move {
@@ -162,7 +167,7 @@ impl AccessVerifier {
                 tokio::time::sleep(MIN_REFRESH_INTERVAL.saturating_sub(last.elapsed())).await;
                 let Some(verifier) = verifier.upgrade() else { break; };
                 last = Instant::now();
-                if let Some(keys) = Self::fetch_keys(&client, &url).await {
+                if let Some(keys) = Self::fetch_keys(&url).await {
                     *verifier.keys.write().unwrap() = keys;
                 }
             }

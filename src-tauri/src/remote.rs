@@ -16,15 +16,16 @@
 //! 桌面端要知道「有没有手机在看、在放什么」：每次放行的请求都把该设备记成活跃（[`VIEWER_TTL_MS`] 内算 1 个
 //! 查看者），手机回写的进度记成 [`NowPlaying`]，两者都随 [`Status`] 一起返回。
 
-use crate::remote_access::AccessVerifier;
+use crate::remote_access::{AccessVerifier, ORIGIN_PORT};
 use crate::remote_events::{Answer, Events, Stream};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +48,7 @@ pub const ALLOWED: &[&str] = &[
 ];
 /// 请求体上限，别让一个请求把内存吃掉。
 const MAX_BODY: usize = 16 * 1024;
+const MAX_TUNNEL_REQUESTS: usize = 8;
 /// 端口族大小，与 lib.rs 的 UI_PORTS 保持一致（由调用方传入，这里只做兜底）。
 const PORT_FAMILY: u16 = 20;
 
@@ -96,6 +98,11 @@ pub struct NowPlaying {
     pub updated_at: i64,
 }
 
+struct DeviceStore {
+    path: PathBuf,
+    conn: Connection,
+}
+
 #[derive(Default)]
 struct Inner {
     enabled: bool,
@@ -106,8 +113,8 @@ struct Inner {
     locked_until: i64,
     devices: Vec<Device>,
     next_device_id: u64,
-    storage: Option<Connection>,
-    clear_store_on_enable: bool,
+    storage: Option<DeviceStore>,
+    stores_pending_clear: HashSet<PathBuf>,
 }
 
 /// 配对/令牌的纯状态机，不碰网络，方便测试。
@@ -204,7 +211,10 @@ impl Gateway {
                 id INTEGER PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
                 paired_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_seen INTEGER);",
         )?;
-        if g.clear_store_on_enable { conn.execute("DELETE FROM remote_devices", [])?; }
+        if g.stores_pending_clear.contains(path) {
+            conn.execute("DELETE FROM remote_devices", [])?;
+            g.stores_pending_clear.remove(path);
+        }
         let now = self.now();
         conn.execute("DELETE FROM remote_devices WHERE expires_at <= ?1", [now])?;
         let devices: Vec<Device> = {
@@ -218,8 +228,7 @@ impl Gateway {
         };
         g.next_device_id = g.next_device_id.max(devices.iter().map(|d| d.id).max().unwrap_or(0));
         g.devices = devices;
-        g.storage = Some(conn);
-        g.clear_store_on_enable = false;
+        g.storage = Some(DeviceStore { path: path.to_owned(), conn });
         Ok(())
     }
 
@@ -246,8 +255,10 @@ impl Gateway {
         g.failed = 0;
         g.locked_until = 0;
         g.devices.clear();
-        let result = g.storage.take().map_or(Ok(0), |store| store.execute("DELETE FROM remote_devices", []));
-        g.clear_store_on_enable |= result.is_err();
+        let Some(store) = g.storage.take() else { return Ok(()); };
+        let result = store.conn.execute("DELETE FROM remote_devices", []);
+        if result.is_err() { g.stores_pending_clear.insert(store.path); }
+        else { g.stores_pending_clear.remove(&store.path); }
         result.map(|_| ())
     }
 
@@ -325,7 +336,7 @@ impl Gateway {
             now_playing: None,
         };
         if let Some(store) = &g.storage {
-            if store.execute("INSERT INTO remote_devices(id,token_hash,label,paired_at,expires_at) VALUES (?1,?2,?3,?4,?5)",
+            if store.conn.execute("INSERT INTO remote_devices(id,token_hash,label,paired_at,expires_at) VALUES (?1,?2,?3,?4,?5)",
                 params![device.id, device.token_hash, device.label, now, expires_at]).is_err() {
                 g.code = Some(expected);
                 return Err(PairError::Unavailable);
@@ -340,8 +351,8 @@ impl Gateway {
     fn revoke(&self, device: Option<u64>) -> rusqlite::Result<()> {
         let mut g = self.inner.lock().unwrap();
         let result = match (device, &g.storage) {
-            (Some(id), Some(store)) => store.execute("DELETE FROM remote_devices WHERE id=?1", [id]),
-            (None, Some(store)) => store.execute("DELETE FROM remote_devices", []),
+            (Some(id), Some(store)) => store.conn.execute("DELETE FROM remote_devices WHERE id=?1", [id]),
+            (None, Some(store)) => store.conn.execute("DELETE FROM remote_devices", []),
             (_, None) => Ok(0),
         };
         if let Some(id) = device {
@@ -351,7 +362,11 @@ impl Gateway {
             g.devices.clear();
             self.events.clear();
         }
-        g.clear_store_on_enable |= result.is_err();
+        if result.is_err() {
+            if let Some(path) = g.storage.as_ref().map(|store| store.path.clone()) { g.stores_pending_clear.insert(path); }
+        } else if device.is_none() {
+            if let Some(path) = g.storage.as_ref().map(|store| store.path.clone()) { g.stores_pending_clear.remove(&path); }
+        }
         result.map(|_| ())
     }
 
@@ -400,7 +415,7 @@ impl Gateway {
         device.last_seen = Some(now);
         if now - device.recorded_at >= 15_000 {
             if let Some(store) = storage {
-                if store.execute("UPDATE remote_devices SET last_seen=?2 WHERE id=?1", params![device.id, now]).is_ok() {
+                if store.conn.execute("UPDATE remote_devices SET last_seen=?2 WHERE id=?1", params![device.id, now]).is_ok() {
                     device.recorded_at = now;
                 }
             }
@@ -604,7 +619,7 @@ fn same_origin_request(req: &tiny_http::Request, local: SocketAddr, access: Opti
 /// 把一个 tiny_http 请求走一遍 [`route`] 并把结果写回去。
 fn respond(
     mut req: tiny_http::Request, local: SocketAddr, gw: &Arc<Gateway>,
-    files: &dyn Files, commands: &dyn Commands, access: Option<&AccessVerifier>,
+    files: &dyn Files, commands: &dyn Commands, access: Option<&AccessVerifier>, stop: &AtomicBool,
 ) {
     let method = req.method().as_str().to_string();
     let path = req.url().split(['?', '#']).next().unwrap_or("/").to_string();
@@ -624,6 +639,10 @@ fn respond(
         send_reply(req, Reply::json(403, json!({"error": "forbidden"})));
         return;
     }
+    if stop.load(Ordering::Acquire) {
+        send_reply(req, Reply::json(503, json!({"error": "disabled"})));
+        return;
+    }
     let authorization = req.headers().iter().find(|h| h.field.equiv("authorization")).map(|h| h.value.as_str().to_string());
     if path == "/events" {
         match open_events(&req, gw, authorization.as_deref(), access_expiry) {
@@ -636,8 +655,14 @@ fn respond(
     }
     let mut body = Vec::new();
     use std::io::Read;
-    let _ = req.as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut body);
-    let mut reply = if body.len() > MAX_BODY {
+    let read = req.as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut body);
+    let mut reply = if stop.load(Ordering::Acquire) {
+        Reply::json(503, json!({"error": "disabled"}))
+    } else if access_expiry.is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp()) {
+        Reply::json(401, json!({"error": "access_required"}))
+    } else if read.is_err() {
+        Reply::json(400, json!({"error": "bad_body"}))
+    } else if body.len() > MAX_BODY {
         Reply::json(413, json!({"error": "too_large"}))
     } else {
         route(gw, files, commands, &HttpIn { method, path, authorization, access: access.is_some(), body })
@@ -686,11 +711,28 @@ pub fn serve(
     files: Arc<dyn Files>, commands: Arc<dyn Commands>, access: Option<Arc<AccessVerifier>>,
 ) {
     let Some(local) = server.server_addr().to_ip() else { return; };
+    let active_requests = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::Acquire) {
-        match server.recv_timeout(std::time::Duration::from_millis(250)) {
-            Ok(Some(req)) if !stop.load(Ordering::Acquire) => respond(req, local, &gw, &*files, &*commands, access.as_deref()),
-            Ok(_) => {},
+        let req = match server.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok(Some(req)) if !stop.load(Ordering::Acquire) => req,
+            Ok(_) => continue,
             Err(_) => break,
+        };
+        if let Some(access) = &access {
+            // A delayed request body must not hold the listener open or block other browser requests.
+            if active_requests.fetch_update(Ordering::AcqRel, Ordering::Acquire,
+                |count| (count < MAX_TUNNEL_REQUESTS).then_some(count + 1)).is_err() {
+                send_reply(req, Reply::json(429, json!({"error": "too_many_connections"})));
+                continue;
+            }
+            let (gw, files, commands, access, stop, active) =
+                (gw.clone(), files.clone(), commands.clone(), access.clone(), stop.clone(), active_requests.clone());
+            std::thread::spawn(move || {
+                respond(req, local, &gw, &*files, &*commands, Some(&access), &stop);
+                active.fetch_sub(1, Ordering::Release);
+            });
+        } else {
+            respond(req, local, &gw, &*files, &*commands, None, &stop);
         }
     }
 }
@@ -782,10 +824,11 @@ impl Remote {
             chosen = bind_port(0, &targets);
         } else {
             for p in port..port.saturating_add(family) {
+                if p == ORIGIN_PORT { continue; }
                 if let Some(found) = bind_port(p, &targets) { chosen = Some(found); break; }
             }
         }
-        let Some((port, listeners)) = chosen else {
+        let Some((port, listeners)) = chosen.filter(|(port, _)| *port != ORIGIN_PORT) else {
             // 一个地址都绑不上：保持关闭，让界面把原因说清楚。
             return Ok(self.status_locked(&s));
         };
@@ -1516,6 +1559,54 @@ mod tests {
     }
 
     #[test]
+    fn failed_https_revocation_is_retried_only_for_its_own_device_store() {
+        let dir = std::env::temp_dir().join(format!("subcast-access-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let lan = dir.join("lan.db");
+        let https = dir.join("https.db");
+
+        let (_, other) = new_gw();
+        other.open_device_store(&lan).unwrap();
+        let lan_code = other.enable().code.unwrap();
+        let lan_token = other.pair(&lan_code, "Existing LAN device").unwrap().token;
+        drop(other);
+
+        let (_, gateway) = new_gw();
+        gateway.open_device_store(&https).unwrap();
+        let https_code = gateway.activate(true).code.unwrap();
+        let https_token = gateway.pair_for(&https_code, "HTTPS device", true).unwrap().token;
+        let db = Connection::open(&https).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_delete BEFORE DELETE ON remote_devices
+            BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;").unwrap();
+        assert!(gateway.disable().is_err());
+
+        gateway.open_device_store(&lan).unwrap();
+        gateway.enable();
+        assert!(gateway.authorize(&lan_token));
+        assert!(!gateway.authorize(&https_token));
+        gateway.disable().unwrap();
+
+        db.execute_batch("DROP TRIGGER reject_delete;").unwrap();
+        gateway.open_device_store(&https).unwrap();
+        gateway.activate(true);
+        assert!(gateway.authorize_device(&https_token, true).is_none());
+        gateway.disable().unwrap();
+        drop(db);
+        std::fs::remove_file(lan).unwrap();
+        std::fs::remove_file(https).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn lan_never_binds_the_reserved_access_origin_port() {
+        let remote = Remote::new();
+        let status = remote.enable(ORIGIN_PORT, 2, vec![Ipv4Addr::LOCALHOST],
+            Arc::new(NoFiles), Arc::new(FakeCommands::new(false)), None).unwrap();
+        assert_ne!(status.port, ORIGIN_PORT);
+        remote.disable().unwrap();
+    }
+
+    #[test]
     fn tunnel_origin_checks_access_before_assets_pairing_rpc_and_events() {
         use crate::remote_access::tests::{fixture, settings};
 
@@ -1557,6 +1648,22 @@ mod tests {
         let headers = format!("{browser}Authorization: Bearer {device}\r\n");
         assert_eq!(request("POST", "/rpc/list_shows", &headers, "{}").0, 200);
         assert_eq!(request("POST", "/rpc/get_settings", &headers, "{}").0, 403);
+
+        // The authenticated event connection uses the same identity and device boundaries as RPC.
+        use std::io::{BufRead, BufReader, Write};
+        remote.note_asr("e1", json!({"episodeId": "e1", "stage": "transcribe", "progress": 0.5}));
+        let mut stream = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        write!(stream, "GET /events?episodeId=e1 HTTP/1.1\r\nHost: subcast.example.com\r\n{headers}Connection: close\r\n\r\n").unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        while !response.contains(r#""progress":0.5"#) {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            response.push_str(&line);
+        }
+        assert!(response.contains("Content-Type: text/event-stream") && response.contains("event: asr"));
+        drop(reader);
 
         // A device token from the HTTPS origin does not authorize the regular LAN/desktop HTTP endpoint.
         assert_eq!(route(&remote.gw, &NoFiles, &*commands, &rpc_req("list_shows", Some(device))).status, 401);
