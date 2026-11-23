@@ -1837,6 +1837,22 @@ const dict: Record<string, string> = {
   "正在回答…": "Answering…",
   "提问": "Ask",
   "复制回答": "Copy answer",
+  "请检查 HTTPS 地址、团队名称、应用 AUD 和允许的邮箱。": "Check the HTTPS URL, team name, app AUD and allowed email address.",
+  "无法读取 Access 公钥，请检查团队名称和 Mac 的网络。": "Could not load Access public keys. Check the team name and your Mac’s connection.",
+  "HTTPS 回环端口 14347 暂不可用。": "HTTPS loopback port 14347 is unavailable.",
+  "无法打开 HTTPS 设备记录。": "Could not open the HTTPS device registry.",
+  "请先关闭当前的手机访问。": "Turn off the current phone access session first.",
+  "允许的邮箱登录 Access 并完成配对后，可以跨网收听和提问。提问会使用这台电脑配置的模型与 Key。": "The allowed email can sign in to Access and pair to listen and ask questions remotely. Questions use this computer’s model and key.",
+  "公开 HTTPS 地址": "Public HTTPS address",
+  "Access 团队名称": "Access team name",
+  "Access 应用 AUD": "Access application AUD",
+  "允许登录的邮箱": "Allowed email address",
+  "手机访问方式": "Phone access method",
+  "局域网或 Tailscale": "LAN or Tailscale",
+  "跨网络 HTTPS": "Remote HTTPS",
+  "使用 Cloudflare Tunnel 和 Access。将 Tunnel 的来源设为 {origin}。": "Use Cloudflare Tunnel and Access. Set the Tunnel origin to {origin}.",
+  "允许手机通过 HTTPS 访问": "Allow phone access over HTTPS",
+  "在手机浏览器打开 HTTPS 地址，登录 Access 后输入配对码。": "Open the HTTPS address in your phone browser, sign in to Access and enter the pairing code.",
 };
 
 export default dict;

@@ -61,7 +61,13 @@ export const transport: Transport = IS_DESKTOP ? desktopTransport : phoneTranspo
 const invoke = <T>(command: string, args?: Record<string, unknown>) => transport.call<T>(command, args);
 
 /** One address the phone can open. `kind` is translated in the UI. */
-export interface RemoteUrl { kind: "lan" | "tailscale" | "loopback"; url: string }
+export interface RemoteUrl { kind: "lan" | "tailscale" | "loopback" | "https"; url: string }
+export interface RemoteHttpsConfig {
+  publicUrl: string;
+  teamName: string;
+  audience: string;
+  email: string;
+}
 export interface RemoteStatus {
   enabled: boolean;
   port: number;
@@ -324,6 +330,8 @@ export const api = {
   remoteStatus: () => invoke<RemoteStatus>("remote_status"),
   /** 打开手机访问（额外的局域网监听 + 新配对码）。 */
   enableRemote: () => invoke<RemoteStatus>("remote_enable"),
+  remoteHttpsConfig: () => invoke<RemoteHttpsConfig | null>("remote_https_config"),
+  enableRemoteHttps: (config: RemoteHttpsConfig) => invoke<RemoteStatus>("remote_enable_https", { config }),
   /** 关闭手机访问：停止监听并吊销全部令牌。 */
   disableRemote: () => invoke<RemoteStatus>("remote_disable"),
   /** 重新生成配对码。 */

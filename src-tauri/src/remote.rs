@@ -16,6 +16,7 @@
 //! 桌面端要知道「有没有手机在看、在放什么」：每次放行的请求都把该设备记成活跃（[`VIEWER_TTL_MS`] 内算 1 个
 //! 查看者），手机回写的进度记成 [`NowPlaying`]，两者都随 [`Status`] 一起返回。
 
+use crate::remote_access::AccessVerifier;
 use crate::remote_events::{Answer, Events, Stream};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -98,6 +99,7 @@ pub struct NowPlaying {
 #[derive(Default)]
 struct Inner {
     enabled: bool,
+    access_only: bool,
     code: Option<String>,
     code_expires_at: i64,
     failed: u32,
@@ -222,9 +224,12 @@ impl Gateway {
     }
 
     /// 打开：生成配对码，并允许仍在有效期内的已配对设备接入。
-    pub fn enable(&self) -> GatewayStatus {
+    pub fn enable(&self) -> GatewayStatus { self.activate(false) }
+
+    fn activate(&self, access_only: bool) -> GatewayStatus {
         let mut g = self.inner.lock().unwrap();
         g.enabled = true;
+        g.access_only = access_only;
         g.failed = 0;
         g.locked_until = 0;
         self.new_code(&mut g);
@@ -282,10 +287,13 @@ impl Gateway {
     }
 
     /// 校验配对码；成功则签发一个 7 天令牌（只把哈希留下），配对码作废。
-    pub fn pair(&self, code: &str, label: &str) -> Result<Issued, PairError> {
+    #[cfg(test)]
+    pub fn pair(&self, code: &str, label: &str) -> Result<Issued, PairError> { self.pair_for(code, label, false) }
+
+    fn pair_for(&self, code: &str, label: &str, access: bool) -> Result<Issued, PairError> {
         let now = self.now();
         let mut g = self.inner.lock().unwrap();
-        if !g.enabled { return Err(PairError::Disabled); }
+        if !g.enabled || g.access_only != access { return Err(PairError::Disabled); }
         if g.locked_until > now { return Err(PairError::Locked); }
         let Some(expected) = g.code.take() else { return Err(PairError::Invalid) };
         if g.code_expires_at <= now { return Err(PairError::Expired); }
@@ -376,11 +384,11 @@ impl Gateway {
     }
 
     /// 令牌对应的设备编号（开关打开、未过期、没被吊销），顺手记下这次活跃时间。任何原因不通过都是 None。
-    pub fn authorize_device(&self, token: &str) -> Option<u64> {
+    fn authorize_device(&self, token: &str, access: bool) -> Option<u64> {
         if token.is_empty() { return None; }
         let now = self.now();
         let mut g = self.inner.lock().unwrap();
-        if !g.enabled { return None; }
+        if !g.enabled || g.access_only != access { return None; }
         g.devices.retain(|d| {
             let active = d.expires_at > now;
             if !active { self.events.remove(d.id); }
@@ -402,7 +410,7 @@ impl Gateway {
 
     /// 令牌是否可用（开关打开、未过期、没被吊销）。任何原因不通过都只是 false。
     #[cfg(test)]
-    pub fn authorize(&self, token: &str) -> bool { self.authorize_device(token).is_some() }
+    pub fn authorize(&self, token: &str) -> bool { self.authorize_device(token, false).is_some() }
 
     /// 手机回写进度成功：记下「在放哪一期、到哪了」。桌面设置页刷新 [`Status`] 就能看到。
     fn note_progress(&self, device_id: u64, episode_id: &str, seconds: f64, playing: bool) {
@@ -440,6 +448,7 @@ pub struct HttpIn {
     pub method: String,
     pub path: String,
     pub authorization: Option<String>,
+    pub access: bool,
     pub body: Vec<u8>,
 }
 
@@ -501,7 +510,7 @@ pub fn route(gw: &Gateway, files: &dyn Files, commands: &dyn Commands, req: &Htt
         if req.method != "POST" { return Reply::json(405, json!({"error": "method_not_allowed"})); }
         // 先验令牌：缺 / 过期 / 已吊销 / 伪造一律 401，不说原因。通过时顺手记下这台设备还活跃。
         let Some(token) = bearer(req.authorization.as_deref()) else { return Reply::json(401, json!({"error": "unauthorized"})); };
-        let Some(device_id) = gw.authorize_device(token) else { return Reply::json(401, json!({"error": "unauthorized"})); };
+        let Some(device_id) = gw.authorize_device(token, req.access) else { return Reply::json(401, json!({"error": "unauthorized"})); };
         if let Err(status) = gw.admit_rpc(device_id) {
             let code = if status == 401 { "unauthorized" } else { "rate_limited" };
             return Reply::json(status, json!({"error": code}));
@@ -560,7 +569,7 @@ fn pair(gw: &Gateway, req: &HttpIn) -> Reply {
         Ok(b) => b,
         Err(_) => return Reply::json(400, json!({"error": "bad_body"})),
     };
-    match gw.pair(&body.code, &body.name) {
+    match gw.pair_for(&body.code, &body.name, req.access) {
         Ok(issued) => Reply::json(200, json!({
             "token": issued.token,
             "expiresAt": issued.expires_at,
@@ -569,10 +578,17 @@ fn pair(gw: &Gateway, req: &HttpIn) -> Reply {
     }
 }
 
-fn same_origin_request(req: &tiny_http::Request, local: SocketAddr) -> bool {
-    let get = |name: &str| req.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name)).map(|h| h.value.as_str());
-    if get("x-subcast-client") != Some("phone") { return false; }
-    let Some(host) = get("host") else { return false; };
+fn request_header<'a>(req: &'a tiny_http::Request, name: &str) -> Option<&'a str> {
+    req.headers().iter().find(|header| header.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|header| header.value.as_str())
+}
+
+fn same_origin_request(req: &tiny_http::Request, local: SocketAddr, access: Option<&AccessVerifier>) -> bool {
+    if request_header(req, "x-subcast-client") != Some("phone") { return false; }
+    let Some(source) = request_header(req, "origin").or_else(|| request_header(req, "referer"))
+        .and_then(|raw| reqwest::Url::parse(raw).ok()) else { return false; };
+    if let Some(access) = access { return access.is_same_origin(&source); }
+    let Some(host) = request_header(req, "host") else { return false; };
     let Ok(expected) = reqwest::Url::parse(&format!("http://{host}")) else { return false; };
     if expected.port_or_known_default() != Some(local.port()) || expected.path() != "/" || expected.query().is_some()
         || expected.fragment().is_some() || !expected.username().is_empty() || expected.password().is_some() { return false; }
@@ -582,23 +598,35 @@ fn same_origin_request(req: &tiny_http::Request, local: SocketAddr) -> bool {
         None => false,
     };
     if !bound_host { return false; }
-    get("origin").or_else(|| get("referer"))
-        .and_then(|raw| reqwest::Url::parse(raw).ok())
-        .is_some_and(|source| source.origin() == expected.origin())
+    source.origin() == expected.origin()
 }
 
 /// 把一个 tiny_http 请求走一遍 [`route`] 并把结果写回去。
-fn respond(mut req: tiny_http::Request, local: SocketAddr, gw: &Arc<Gateway>, files: &dyn Files, commands: &dyn Commands) {
+fn respond(
+    mut req: tiny_http::Request, local: SocketAddr, gw: &Arc<Gateway>,
+    files: &dyn Files, commands: &dyn Commands, access: Option<&AccessVerifier>,
+) {
     let method = req.method().as_str().to_string();
     let path = req.url().split(['?', '#']).next().unwrap_or("/").to_string();
+    let access_expiry = if let Some(access) = access {
+        if !local.ip().is_loopback() || !request_header(&req, "host").is_some_and(|host| access.matches_host(host)) {
+            send_reply(req, Reply::json(403, json!({"error": "forbidden"})));
+            return;
+        }
+        let Some(expiry) = request_header(&req, "cf-access-jwt-assertion").and_then(|token| access.authenticate(token)) else {
+            send_reply(req, Reply::json(401, json!({"error": "access_required"})));
+            return;
+        };
+        Some(expiry)
+    } else { None };
     if (path == "/pair" || path == "/pair/" || path.starts_with("/rpc/") || path == "/events")
-        && !same_origin_request(&req, local) {
+        && !same_origin_request(&req, local, access) {
         send_reply(req, Reply::json(403, json!({"error": "forbidden"})));
         return;
     }
     let authorization = req.headers().iter().find(|h| h.field.equiv("authorization")).map(|h| h.value.as_str().to_string());
     if path == "/events" {
-        match open_events(&req, gw, authorization.as_deref()) {
+        match open_events(&req, gw, authorization.as_deref(), access_expiry) {
             Ok(stream) => {
                 std::thread::spawn(move || stream.write_to(req.into_writer()));
             }
@@ -609,11 +637,12 @@ fn respond(mut req: tiny_http::Request, local: SocketAddr, gw: &Arc<Gateway>, fi
     let mut body = Vec::new();
     use std::io::Read;
     let _ = req.as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut body);
-    let reply = if body.len() > MAX_BODY {
+    let mut reply = if body.len() > MAX_BODY {
         Reply::json(413, json!({"error": "too_large"}))
     } else {
-        route(gw, files, commands, &HttpIn { method, path, authorization, body })
+        route(gw, files, commands, &HttpIn { method, path, authorization, access: access.is_some(), body })
     };
+    reply.no_store |= access.is_some();
     send_reply(req, reply);
 }
 
@@ -632,10 +661,10 @@ fn send_reply(req: tiny_http::Request, reply: Reply) {
     let _ = req.respond(resp);
 }
 
-fn open_events(req: &tiny_http::Request, gw: &Arc<Gateway>, authorization: Option<&str>) -> Result<Stream, Reply> {
+fn open_events(req: &tiny_http::Request, gw: &Arc<Gateway>, authorization: Option<&str>, access_expiry: Option<i64>) -> Result<Stream, Reply> {
     let reject = |status, code| Reply::json(status, json!({"error": code}));
     if req.method() != &tiny_http::Method::Get { return Err(reject(405, "method_not_allowed")); }
-    let device = bearer(authorization).and_then(|token| gw.authorize_device(token))
+    let device = bearer(authorization).and_then(|token| gw.authorize_device(token, access_expiry.is_some()))
         .ok_or_else(|| reject(401, "unauthorized"))?;
     let url = reqwest::Url::parse(&format!("http://localhost{}", req.url()))
         .map_err(|_| reject(400, "bad_args"))?;
@@ -648,15 +677,18 @@ fn open_events(req: &tiny_http::Request, gw: &Arc<Gateway>, authorization: Optio
     } else { None };
     let after = query.get("after").and_then(|id| id.parse().ok()).unwrap_or(0);
     let slot = gw.events.connect(device).ok_or_else(|| reject(429, "too_many_connections"))?;
-    Ok(Stream::new(gw.clone(), device, episode, question, after, slot))
+    Ok(Stream::new(gw.clone(), device, episode, question, after, slot, access_expiry))
 }
 
 /// 服务循环：一个 listener 一条线程，`stop` 打开后立刻回 503 并退出。
-pub fn serve(server: Arc<tiny_http::Server>, stop: Arc<AtomicBool>, gw: Arc<Gateway>, files: Arc<dyn Files>, commands: Arc<dyn Commands>) {
+pub fn serve(
+    server: Arc<tiny_http::Server>, stop: Arc<AtomicBool>, gw: Arc<Gateway>,
+    files: Arc<dyn Files>, commands: Arc<dyn Commands>, access: Option<Arc<AccessVerifier>>,
+) {
     let Some(local) = server.server_addr().to_ip() else { return; };
     while !stop.load(Ordering::Acquire) {
         match server.recv_timeout(std::time::Duration::from_millis(250)) {
-            Ok(Some(req)) if !stop.load(Ordering::Acquire) => respond(req, local, &gw, &*files, &*commands),
+            Ok(Some(req)) if !stop.load(Ordering::Acquire) => respond(req, local, &gw, &*files, &*commands, access.as_deref()),
             Ok(_) => {},
             Err(_) => break,
         }
@@ -740,9 +772,10 @@ impl Remote {
         targets: Vec<Ipv4Addr>,
         files: Arc<dyn Files>,
         commands: Arc<dyn Commands>,
-    ) -> Status {
+        storage: Option<&Path>,
+    ) -> rusqlite::Result<Status> {
         let mut s = self.session.lock().unwrap();
-        if s.enabled { return self.status_locked(&s); }
+        if s.enabled { return Ok(self.status_locked(&s)); }
         let family = if family == 0 { PORT_FAMILY } else { family };
         let mut chosen: Option<(u16, Vec<(Ipv4Addr, TcpListener)>)> = None;
         if port == 0 {
@@ -754,28 +787,51 @@ impl Remote {
         }
         let Some((port, listeners)) = chosen else {
             // 一个地址都绑不上：保持关闭，让界面把原因说清楚。
-            return self.status_locked(&s);
+            return Ok(self.status_locked(&s));
         };
+        if let Some(path) = storage { self.gw.open_device_store(path)?; }
         let servers: Vec<_> = listeners.into_iter().filter_map(|(ip, listener)|
-            self.start_listener(ip, listener, &files, &commands)
+            self.start_listener(ip, listener, &files, &commands, None)
         ).collect();
-        if servers.is_empty() { return self.status_locked(&s); }
+        if servers.is_empty() { return Ok(self.status_locked(&s)); }
         self.gw.enable();
         s.enabled = true;
         s.port = port;
         s.servers = servers;
         s.service = Some((files, commands));
         Self::update_urls(&mut s);
-        self.status_locked(&s)
+        Ok(self.status_locked(&s))
+    }
+
+    pub fn enable_https(
+        &self, port: u16, access: Arc<AccessVerifier>, files: Arc<dyn Files>,
+        commands: Arc<dyn Commands>, storage: Option<&Path>,
+    ) -> Result<Status, &'static str> {
+        let mut session = self.session.lock().unwrap();
+        if session.enabled { return Err("phone_access_already_enabled"); }
+        let address = Ipv4Addr::LOCALHOST;
+        let listener = TcpListener::bind((address, port)).map_err(|_| "access_port_in_use")?;
+        let port = listener.local_addr().map_err(|_| "access_port_in_use")?.port();
+        if let Some(path) = storage { self.gw.open_device_store(path).map_err(|_| "access_store_unavailable")?; }
+        let url = access.settings().public_url.clone();
+        let handle = self.start_listener(address, listener, &files, &commands, Some(access))
+            .ok_or("access_port_in_use")?;
+        self.gw.activate(true);
+        session.enabled = true;
+        session.port = port;
+        session.servers = vec![handle];
+        session.urls = vec![Url { kind: "https", url }];
+        Ok(self.status_locked(&session))
     }
 
     fn start_listener(
         &self, ip: Ipv4Addr, listener: TcpListener, files: &Arc<dyn Files>, commands: &Arc<dyn Commands>,
+        access: Option<Arc<AccessVerifier>>,
     ) -> Option<ServerHandle> {
         let server = Arc::new(tiny_http::Server::from_listener(listener, None).ok()?);
         let stop = Arc::new(AtomicBool::new(false));
         let (gw, files, commands, stop2, server2) = (self.gw.clone(), files.clone(), commands.clone(), stop.clone(), server.clone());
-        std::thread::spawn(move || serve(server2, stop2, gw, files, commands));
+        std::thread::spawn(move || serve(server2, stop2, gw, files, commands, access));
         Some(ServerHandle { ip, server, stop })
     }
 
@@ -791,7 +847,7 @@ impl Remote {
         for &ip in targets {
             if s.servers.iter().any(|server| server.ip == ip) { continue; }
             if let Ok(listener) = TcpListener::bind((ip, s.port)) {
-                if let Some(handle) = self.start_listener(ip, listener, &files, &commands) { s.servers.push(handle); }
+                if let Some(handle) = self.start_listener(ip, listener, &files, &commands, None) { s.servers.push(handle); }
             }
         }
         Self::update_urls(&mut s);
@@ -973,13 +1029,13 @@ mod tests {
     }
 
     fn pair_req(code: &str) -> HttpIn {
-        HttpIn { method: "POST".into(), path: "/pair".into(), authorization: None, body: serde_json::to_vec(&json!({"code": code, "name": "iPhone"})).unwrap() }
+        HttpIn { method: "POST".into(), path: "/pair".into(), authorization: None, access: false, body: serde_json::to_vec(&json!({"code": code, "name": "iPhone"})).unwrap() }
     }
     fn rpc_req(command: &str, token: Option<&str>) -> HttpIn {
-        HttpIn { method: "POST".into(), path: format!("/rpc/{command}"), authorization: token.map(|t| format!("Bearer {t}")), body: b"{}".to_vec() }
+        HttpIn { method: "POST".into(), path: format!("/rpc/{command}"), authorization: token.map(|t| format!("Bearer {t}")), access: false, body: b"{}".to_vec() }
     }
     fn rpc_args_req(command: &str, token: Option<&str>, args: &Value) -> HttpIn {
-        HttpIn { method: "POST".into(), path: format!("/rpc/{command}"), authorization: token.map(|t| format!("Bearer {t}")), body: serde_json::to_vec(args).unwrap() }
+        HttpIn { method: "POST".into(), path: format!("/rpc/{command}"), authorization: token.map(|t| format!("Bearer {t}")), access: false, body: serde_json::to_vec(args).unwrap() }
     }
     fn new_gw() -> (Arc<AtomicI64>, Arc<Gateway>) {
         let (clock, c) = test_clock();
@@ -1337,14 +1393,14 @@ mod tests {
         let (_clock, gw) = new_gw();
         let files = NoFiles;
         let cmds = FakeCommands::new(false);
-        let get = |path: &str| HttpIn { method: "GET".into(), path: path.into(), authorization: None, body: vec![] };
+        let get = |path: &str| HttpIn { method: "GET".into(), path: path.into(), authorization: None, access: false, body: vec![] };
         let r = route(&gw, &files, &cmds, &get("/"));
         assert_eq!(r.status, 200);
         assert_eq!(r.body, b"<html>ok</html>");
         assert_eq!(route(&gw, &files, &cmds, &get("/logo.png")).status, 404);
         assert_eq!(route(&gw, &files, &cmds, &get("/../secret")).status, 404);
         assert_eq!(route(&gw, &files, &cmds, &get("/%2e%2e/secret")).status, 404);
-        assert_eq!(route(&gw, &files, &cmds, &HttpIn { method: "PUT".into(), path: "/".into(), authorization: None, body: vec![] }).status, 404);
+        assert_eq!(route(&gw, &files, &cmds, &HttpIn { method: "PUT".into(), path: "/".into(), authorization: None, access: false, body: vec![] }).status, 404);
     }
 
     #[test]
@@ -1408,7 +1464,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         let remote = Remote::new();
         let commands = Arc::new(ChatCommands(Mutex::new(None)));
-        let status = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], Arc::new(NoFiles), commands.clone());
+        let status = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], Arc::new(NoFiles), commands.clone(), None).unwrap();
         let port = status.port;
         let owner = remote.gw.pair(&status.code.unwrap(), "owner").unwrap().token;
         let other = remote.gw.pair(&remote.regenerate().code.unwrap(), "other").unwrap().token;
@@ -1460,11 +1516,62 @@ mod tests {
     }
 
     #[test]
+    fn tunnel_origin_checks_access_before_assets_pairing_rpc_and_events() {
+        use crate::remote_access::tests::{fixture, settings};
+
+        let data = fixture();
+        let access = AccessVerifier::with_test_keys(settings(), data["jwks"].clone());
+        let remote = Remote::new();
+        let commands = Arc::new(FakeCommands::new(false));
+        let status = remote.enable_https(0, access, Arc::new(NoFiles), commands.clone(), None).unwrap();
+        let port = status.port;
+        assert_eq!(status.urls, vec![Url { kind: "https", url: "https://subcast.example.com".into() }]);
+        let valid = data["valid"].as_str().unwrap();
+        let expired = data["expired"].as_str().unwrap();
+        let request = |method, path, extras: &str, body: &str| {
+            exchange_http(port, &format!("{method} {path} HTTP/1.1\r\nHost: subcast.example.com\r\n{extras}Connection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()))
+        };
+
+        for (method, path) in [("GET", "/"), ("POST", "/pair"), ("POST", "/rpc/list_shows"), ("GET", "/events?episodeId=e1")] {
+            let (code, body) = request(method, path, "", "");
+            assert_eq!(code, 401, "{method} {path}");
+            assert!(body.contains("access_required"));
+        }
+        assert_eq!(request("GET", "/", &format!("Cf-Access-Jwt-Assertion: {expired}\r\n"), "").0, 401);
+        let assertion = format!("Cf-Access-Jwt-Assertion: {valid}\r\n");
+        let (code, page) = request("GET", "/", &assertion, "");
+        assert_eq!(code, 200);
+        assert_eq!(page, "<html>ok</html>");
+        let wrong_host = format!("GET / HTTP/1.1\r\nHost: other.example.com\r\n{assertion}Connection: close\r\n\r\n");
+        assert_eq!(exchange_http(port, &wrong_host).0, 403);
+        let bad_origin = format!("{assertion}Origin: https://other.example.com\r\nX-Subcast-Client: phone\r\n");
+        assert_eq!(request("POST", "/pair", &bad_origin, "{}").0, 403);
+
+        let browser = format!("{assertion}Origin: https://subcast.example.com\r\nX-Subcast-Client: phone\r\n");
+        let body = json!({"code": status.code.unwrap(), "name": "Test browser"}).to_string();
+        let (code, paired) = request("POST", "/pair", &browser, &body);
+        assert_eq!(code, 200);
+        let paired: Value = serde_json::from_str(&paired).unwrap();
+        let device = paired["token"].as_str().unwrap();
+        assert_eq!(request("POST", "/rpc/list_shows", &browser, "{}").0, 401);
+        let headers = format!("{browser}Authorization: Bearer {device}\r\n");
+        assert_eq!(request("POST", "/rpc/list_shows", &headers, "{}").0, 200);
+        assert_eq!(request("POST", "/rpc/get_settings", &headers, "{}").0, 403);
+
+        // A device token from the HTTPS origin does not authorize the regular LAN/desktop HTTP endpoint.
+        assert_eq!(route(&remote.gw, &NoFiles, &*commands, &rpc_req("list_shows", Some(device))).status, 401);
+        remote.refresh_addresses(&["192.0.2.1".parse().unwrap()]);
+        assert_eq!(remote.status().urls[0].kind, "https");
+        remote.disable().unwrap();
+        assert!(wait_port_closed(port));
+    }
+
+    #[test]
     fn enable_and_disable_over_real_http() {
         let files: Arc<dyn Files> = Arc::new(NoFiles);
         let cmds: Arc<dyn Commands> = Arc::new(FakeCommands::new(false));
         let remote = Remote::new();
-        let st = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], files.clone(), cmds.clone());
+        let st = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], files.clone(), cmds.clone(), None).unwrap();
         assert!(st.enabled, "回环也能开起来（测试环境）");
         let port = st.port;
         assert!(port > 0);
@@ -1489,8 +1596,8 @@ mod tests {
         let files: Arc<dyn Files> = Arc::new(NoFiles);
         let cmds: Arc<dyn Commands> = Arc::new(FakeCommands::new(false));
         let remote = Remote::new();
-        let a = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], files.clone(), cmds.clone());
-        let b = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], files, cmds);
+        let a = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], files.clone(), cmds.clone(), None).unwrap();
+        let b = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], files, cmds, None).unwrap();
         assert_eq!(a.port, b.port, "打开两次不会换端口");
         let c = remote.regenerate();
         assert_ne!(a.code, c.code, "重新生成会换个码");
@@ -1502,11 +1609,15 @@ mod tests {
 
     /// 极简 HTTP 客户端：测试里不想为了一个 POST 再拉依赖。
     fn http_post(port: u16, path: &str, bearer: Option<&str>, body: &str) -> (u16, String) {
-        use std::io::{Read, Write};
-        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
         let auth = bearer.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
         let req = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nX-Subcast-Client: phone\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        exchange_http(port, &req)
+    }
+
+    fn exchange_http(port: u16, req: &str) -> (u16, String) {
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).expect("connect");
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
         stream.write_all(req.as_bytes()).unwrap();
         let mut raw = Vec::new();
         stream.read_to_end(&mut raw).ok();

@@ -114,6 +114,8 @@
     "allow-remote-disable",
     "allow-remote-regenerate",
     "allow-remote-revoke",
+    "allow-remote-https-config",
+    "allow-remote-enable-https",
     "updater:default",
     "process:allow-restart",
     "core:window:allow-start-dragging",

@@ -1897,6 +1897,22 @@ const dict: Record<string, string> = {
   "正在回答…": "正在回答…",
   "提问": "提問",
   "复制回答": "複製回答",
+  "请检查 HTTPS 地址、团队名称、应用 AUD 和允许的邮箱。": "請檢查 HTTPS 位址、團隊名稱、應用程式 AUD 和允許的電子郵件。",
+  "无法读取 Access 公钥，请检查团队名称和 Mac 的网络。": "無法讀取 Access 公開金鑰，請檢查團隊名稱和 Mac 的網路。",
+  "HTTPS 回环端口 14347 暂不可用。": "HTTPS 回送連接埠 14347 暫時無法使用。",
+  "无法打开 HTTPS 设备记录。": "無法開啟 HTTPS 裝置記錄。",
+  "请先关闭当前的手机访问。": "請先關閉目前的手機存取。",
+  "允许的邮箱登录 Access 并完成配对后，可以跨网收听和提问。提问会使用这台电脑配置的模型与 Key。": "允許的電子郵件登入 Access 並完成配對後，可以跨網收聽和提問。提問會使用這台電腦設定的模型與 Key。",
+  "公开 HTTPS 地址": "公開 HTTPS 位址",
+  "Access 团队名称": "Access 團隊名稱",
+  "Access 应用 AUD": "Access 應用程式 AUD",
+  "允许登录的邮箱": "允許登入的電子郵件",
+  "手机访问方式": "手機存取方式",
+  "局域网或 Tailscale": "區域網路或 Tailscale",
+  "跨网络 HTTPS": "跨網路 HTTPS",
+  "使用 Cloudflare Tunnel 和 Access。将 Tunnel 的来源设为 {origin}。": "使用 Cloudflare Tunnel 和 Access。將 Tunnel 的來源設為 {origin}。",
+  "允许手机通过 HTTPS 访问": "允許手機透過 HTTPS 存取",
+  "在手机浏览器打开 HTTPS 地址，登录 Access 后输入配对码。": "在手機瀏覽器開啟 HTTPS 位址，登入 Access 後輸入配對碼。",
 };
 
 export default dict;
