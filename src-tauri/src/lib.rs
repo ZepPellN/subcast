@@ -21,6 +21,7 @@ mod shadow;
 #[cfg_attr(debug_assertions, allow(dead_code))] // serving the interface is release-only
 mod ota;
 mod qiaomu;
+mod remote;
 mod shared;
 mod speech;
 mod transcript;
@@ -35,8 +36,10 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(not(debug_assertions))]
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// The port the bundled app serves its pages from. YouTube's embedded player refuses pages served from the
@@ -757,36 +760,106 @@ fn bind_ui_port(preferred: u16) -> Option<(u16, Vec<std::net::TcpListener>)> {
     None
 }
 
+/// The port the interface server actually got (release fills this in). Phone access binds its LAN addresses on
+/// the same port family, so a phone reaches the same pages the window shows.
+static UI_PORT: AtomicU16 = AtomicU16::new(0);
+
+fn ui_port() -> u16 {
+    match UI_PORT.load(Ordering::Relaxed) { 0 => LOCAL_PORT, port => port }
+}
+
+/// The interface bundle of a hot update, when one is active (release only; debug serves the built-in files).
+#[cfg(not(debug_assertions))]
+static UI_ACTIVE: OnceLock<ota::Active> = OnceLock::new();
+fn ui_active() -> Option<ota::Active> {
+    #[cfg(not(debug_assertions))]
+    { UI_ACTIVE.get().cloned() }
+    #[cfg(debug_assertions)]
+    { None }
+}
+
+/// The interface files the phone page is served from: the hot-update bundle when active, else the built-in ones.
+struct UiFiles { app: AppHandle, active: Option<ota::Active> }
+
+impl remote::Files for UiFiles {
+    fn read(&self, path: &str) -> Option<remote::FileBody> {
+        if let Some(active) = &self.active {
+            if let Some(found) = ota::read(active, path) {
+                return found.map(|(bytes, mime)| remote::FileBody { bytes, mime: mime.to_string(), csp: None });
+            }
+        }
+        self.app.asset_resolver().get(path.to_string()).map(|a| remote::FileBody { bytes: a.bytes, mime: a.mime_type, csp: a.csp_header })
+    }
+}
+
+/// The desktop commands the phone gateway may run. What is allowed lives in remote.rs (a hardcoded whitelist);
+/// T1 only needs 列订阅.
+struct AppCommands(AppHandle);
+
+impl remote::Commands for AppCommands {
+    fn call(&self, command: &str, _args: Value) -> Result<Value, String> {
+        match command {
+            "list_shows" => {
+                let shows = list_shows(self.0.state::<AppState>())?;
+                serde_json::to_value(&shows).map_err(|e| e.to_string())
+            }
+            _ => Err("forbidden".into()),
+        }
+    }
+}
+
 /// Serves the interface on localhost (what tauri-plugin-localhost did), from the active hot update when there is
 /// one. Returns the port, bound before the window opens so it can never load someone else's pages.
+///
+/// The same handler also answers `/pair` and `/rpc/*` for phone access (see remote.rs), so a phone that reaches
+/// this port through the LAN gets exactly the same pages plus the gateway.
 #[cfg(not(debug_assertions))]
 fn serve_ui(app: &AppHandle, active: ota::Active) -> u16 {
     let Some((port, listeners)) = bind_ui_port(LOCAL_PORT) else {
         eprintln!("SubCast: no free port for the interface near {LOCAL_PORT}");
         return LOCAL_PORT;
     };
+    UI_PORT.store(port, Ordering::Relaxed);
     if port != LOCAL_PORT { eprintln!("SubCast: port {LOCAL_PORT} is taken by another program; using {port}"); }
+    let gateway = remote::remote().gw.clone();
+    let files: Arc<dyn remote::Files> = Arc::new(UiFiles { app: app.clone(), active: Some(active) });
+    let commands: Arc<dyn remote::Commands> = Arc::new(AppCommands(app.clone()));
     for listener in listeners {
         let Ok(server) = tiny_http::Server::from_listener(listener, None) else { continue };
-        let (resolver, active) = (app.asset_resolver(), active.clone());
-        std::thread::spawn(move || {
-            for req in server.incoming_requests() {
-                let path = req.url().split(['?', '#']).next().unwrap_or("/").to_string();
-                let found = match ota::read(&active, &path) {
-                    Some(file) => file.map(|(bytes, mime)| (bytes, mime.to_string(), None)),
-                    None => resolver.get(path).map(|a| (a.bytes, a.mime_type, a.csp_header)),
-                };
-                let Some((bytes, mime, csp)) = found else { let _ = req.respond(tiny_http::Response::empty(404)); continue };
-                let mut resp = tiny_http::Response::from_data(bytes);
-                for (k, v) in [("Content-Type", Some(mime)), ("Cache-Control", Some("no-cache".to_string())), ("Content-Security-Policy", csp)] {
-                    if let Some(h) = v.and_then(|v| tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()).ok()) { resp.add_header(h); }
-                }
-                let _ = req.respond(resp);
-            }
-        });
+        let server = Arc::new(server);
+        let (gateway, files, commands) = (gateway.clone(), files.clone(), commands.clone());
+        std::thread::spawn(move || remote::serve(server, Arc::new(AtomicBool::new(false)), gateway, files, commands));
     }
     port
 }
+
+// ---- phone access (手机访问) ----------------------------------------------------------------------------
+
+/// 设置里的「手机访问」开关状态：端口、可打开地址、配对码、已配对设备数。
+#[tauri::command(async)]
+fn remote_status() -> remote::Status { remote::remote().status() }
+
+/// 打开手机访问：在同一端口族上额外绑定局域网地址，生成配对码。已在打开时是幂等的。
+#[tauri::command(async)]
+fn remote_enable(app: AppHandle) -> Res<remote::Status> {
+    let mut targets = remote::local_targets();
+    if targets.is_empty() { return Err("没有找到局域网地址，请先连上同一个 Wi-Fi 或有线网络".into()); }
+    // 回环也绑一份：release 里通常已被界面服务占用，绑定失败会被忽略（界面服务同样处理 /pair 与 /rpc）。
+    targets.push(std::net::Ipv4Addr::LOCALHOST);
+    let files: Arc<dyn remote::Files> = Arc::new(UiFiles { app: app.clone(), active: ui_active() });
+    let commands: Arc<dyn remote::Commands> = Arc::new(AppCommands(app));
+    let status = remote::remote().enable(ui_port(), UI_PORTS, targets, files, commands);
+    if !status.enabled { return Err("界面端口被占用，手机访问没有打开".into()); }
+    Ok(status)
+}
+
+/// 关闭手机访问：停止全部局域网监听，并吊销已签发的令牌（旧令牌立刻 401）。
+#[tauri::command(async)]
+fn remote_disable() -> remote::Status { remote::remote().disable() }
+
+/// 重新生成 6 位配对码（旧的立刻作废）。
+#[tauri::command(async)]
+fn remote_regenerate() -> remote::Status { remote::remote().regenerate() }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1660,6 +1733,7 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             let (ui, ui_port): (ota::Active, u16) = {
                 let active = std::sync::Arc::new(std::sync::RwLock::new(ota::boot(&data)));
+                let _ = UI_ACTIVE.set(active.clone());
                 let port = serve_ui(app.handle(), active.clone());
                 (active, port)
             };
@@ -1713,7 +1787,8 @@ pub fn run() {
             app_update_check, app_update_download, app_update_install,
             shadow_start, shadow_stop, shadow_clear, shadow_ready, shadow_hear, open_mic_settings,
             download_episode, list_downloads, delete_download, clear_downloads, align_audio, save_time_map, list_audio_cache, clear_audio_cache, storage_info, open_data_folder, reveal_download, clear_temp, full_notes, tts_synthesize, tts_system_voices, clear_tts_cache, local_tts_status, local_tts_install, local_tts_delete,
-            video_clip_env, video_clip_warm, video_clip_prepare, video_clip_render, reveal_file
+            video_clip_env, video_clip_warm, video_clip_prepare, video_clip_render, reveal_file,
+            remote_status, remote_enable, remote_disable, remote_regenerate
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

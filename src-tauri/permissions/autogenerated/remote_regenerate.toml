@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-regenerate"
+description = "Enables the remote_regenerate command without any pre-configured scope."
+commands.allow = ["remote_regenerate"]
+
+[[permission]]
+identifier = "deny-remote-regenerate"
+description = "Denies the remote_regenerate command without any pre-configured scope."
+commands.deny = ["remote_regenerate"]
