@@ -1,12 +1,12 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
 import "./styles.css";
 import "./polish.css";
-import { IS_MAC } from "./lib/i18n";
+import { IS_MAC, setLang } from "./lib/i18n";
+import { IS_DESKTOP } from "./lib/api";
 
 // Only macOS draws its window buttons inside the page (overlay title bar); Windows and Linux have a native title bar.
-document.documentElement.classList.toggle("is-mac", IS_MAC);
+if (IS_DESKTOP) document.documentElement.classList.toggle("is-mac", IS_MAC);
 
 // Never leave a blank window: show startup failures.
 const showFatal = (msg: string) => {
@@ -20,8 +20,27 @@ window.addEventListener("error", (e) => showFatal(`${e.message}\n${String(e.erro
 const benign = (r: unknown) => /AbortError|aborted|interrupted by a (new load|call to pause)/i.test(String((r as Error)?.name ?? "") + String((r as Error)?.message ?? r));
 window.addEventListener("unhandledrejection", (e) => { if (!benign(e.reason)) showFatal(String((e.reason as Error)?.stack ?? e.reason)); });
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+// The same bundle serves the desktop window (Tauri) and the phone page (a plain browser on the LAN, see
+// src-tauri/src/remote.rs). Only the phone gets the mobile chunk: the desktop app stays untouched.
+const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+async function boot() {
+  if (IS_DESKTOP) {
+    const { default: App } = await import("./App");
+    root.render(<React.StrictMode><App /></React.StrictMode>);
+  } else {
+    for (const [rel, href] of [["manifest", "/phone.webmanifest"], ["apple-touch-icon", "/phone-icon-192.png"]]) {
+      const link = document.createElement("link");
+      link.rel = rel;
+      link.href = href;
+      document.head.append(link);
+    }
+    const theme = document.createElement("meta");
+    theme.name = "theme-color";
+    theme.content = matchMedia("(prefers-color-scheme: dark)").matches ? "#161616" : "#f8f7f4";
+    document.head.append(theme);
+    const { PhoneApp } = await import("./mobile/PhoneApp");
+    setLang("auto");
+    root.render(<React.StrictMode><PhoneApp /></React.StrictMode>);
+  }
+}
+void boot();

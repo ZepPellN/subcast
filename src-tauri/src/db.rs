@@ -42,6 +42,10 @@ pub fn open(path: &Path) -> Result<Connection> {
     if !has_watched {
         conn.execute_batch("ALTER TABLE episodes ADD COLUMN watched_override TEXT;")?;
     }
+    let has_progress_timestamp: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('episodes') WHERE name='progress_updated_at'", [], |r| r.get::<_, i64>(0))? > 0;
+    if !has_progress_timestamp {
+        conn.execute_batch("ALTER TABLE episodes ADD COLUMN progress_updated_at INTEGER NOT NULL DEFAULT 0;")?;
+    }
     Ok(conn)
 }
 
@@ -182,37 +186,44 @@ pub fn set_audio_url(conn: &Connection, id: &str, url: &str) -> Result<()> {
 }
 
 pub fn set_progress(conn: &Connection, id: &str, seconds: f64) -> Result<()> {
-    let s = seconds.max(0.0);
-    // Resuming playback past 5 s clears an explicit "unseen" reset so auto-tracking takes over again.
-    conn.execute(
-        "UPDATE episodes SET progress=?2, watched_override = CASE WHEN watched_override = 'unseen' AND ?2 > 5.0 THEN NULL ELSE watched_override END WHERE id=?1",
-        params![id, s],
-    )?;
+    write_progress(conn, id, seconds, now_ms())?;
     Ok(())
 }
 
-/// Sets or clears an explicit watched override ("done" | "unseen" | None). Marking "unseen" also resets progress to 0.
+/// A delayed phone write must not replace a position saved more recently on the desktop.
+pub fn write_progress(conn: &Connection, id: &str, seconds: f64, updated_at: i64) -> Result<bool> {
+    let count = conn.execute(
+        "UPDATE episodes SET progress=?2, progress_updated_at=?3,
+         watched_override = CASE WHEN watched_override = 'unseen' AND ?2 > 5.0 THEN NULL ELSE watched_override END
+         WHERE id=?1 AND progress_updated_at <= ?3",
+        params![id, seconds.max(0.0), updated_at],
+    )?;
+    Ok(count > 0)
+}
+
+/// Sets or clears a watched override. Marking an episode unseen also resets its position.
 pub fn set_watched(conn: &Connection, id: &str, watched: Option<&str>) -> Result<()> {
-    match watched {
-        Some("done") => {
-            conn.execute("UPDATE episodes SET watched_override = 'done' WHERE id = ?1", [id])?;
-        }
-        Some("unseen") => {
-            conn.execute("UPDATE episodes SET watched_override = 'unseen', progress = 0 WHERE id = ?1", [id])?;
-        }
-        _ => {
-            conn.execute("UPDATE episodes SET watched_override = NULL WHERE id = ?1", [id])?;
-        }
-    }
+    write_watched(conn, id, watched, now_ms())?;
     Ok(())
+}
+
+pub fn write_watched(conn: &Connection, id: &str, watched: Option<&str>, updated_at: i64) -> Result<bool> {
+    let watched = watched.filter(|state| matches!(*state, "done" | "unseen"));
+    let count = conn.execute(
+        "UPDATE episodes SET watched_override=?2, progress_updated_at=?3,
+         progress = CASE WHEN ?2 = 'unseen' THEN 0 ELSE progress END
+         WHERE id=?1 AND progress_updated_at <= ?3",
+        params![id, watched, updated_at],
+    )?;
+    Ok(count > 0)
 }
 
 /// Marks every unwatched episode of a show as watched ("done"); returns how many changed.
 pub fn mark_show_watched(conn: &Connection, show_id: &str) -> Result<usize> {
-    let sql = format!("UPDATE episodes SET watched_override = 'done' WHERE show_id = ?1 AND NOT {IS_WATCHED_SQL}");
+    let sql = format!("UPDATE episodes SET watched_override = 'done', progress_updated_at = ?2 WHERE show_id = ?1 AND NOT {IS_WATCHED_SQL}");
     // Replace table alias `e.` with direct column names for UPDATE.
     let sql = sql.replace("e.", "");
-    Ok(conn.execute(&sql, [show_id])?)
+    Ok(conn.execute(&sql, params![show_id, now_ms()])?)
 }
 
 pub fn save_transcript(conn: &Connection, t: &Transcript) -> Result<()> {
@@ -382,6 +393,20 @@ mod tests {
         assert!(!get_episode(&conn, "b").unwrap().unwrap().deep);
         drop(conn);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn queued_phone_progress_cannot_move_a_newer_desktop_position_back() {
+        let conn = open(Path::new(":memory:")).unwrap();
+        conn.execute("INSERT INTO episodes(id, show_id, guid, title) VALUES ('e1','s1','g1','Episode')", []).unwrap();
+        assert!(write_progress(&conn, "e1", 80.0, 2000).unwrap());
+        assert!(!write_progress(&conn, "e1", 40.0, 1000).unwrap());
+        assert!(!write_watched(&conn, "e1", Some("done"), 1000).unwrap());
+        let episode = get_episode(&conn, "e1").unwrap().unwrap();
+        assert_eq!(episode.progress, 80.0);
+        assert_eq!(episode.watched_override, None);
+        assert!(write_progress(&conn, "e1", 30.0, 3000).unwrap(), "an intentional seek can move back");
+        assert_eq!(get_episode(&conn, "e1").unwrap().unwrap().progress, 30.0);
     }
 
     #[test]

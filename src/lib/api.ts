@@ -1,7 +1,111 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke as desktopInvoke } from "@tauri-apps/api/core";
+import { listen as desktopListen, type UnlistenFn } from "@tauri-apps/api/event";
 import { tr } from "./i18n";
 import type { Aligned, TimeMap } from "./timemap";
+
+// ---- transport ----------------------------------------------------------------------------------------
+// Everything below talks to the backend through one of two transports: the desktop shell uses Tauri's
+// invoke/event, the phone page (served over HTTP by the desktop, see src-tauri/src/remote.rs) uses the
+// JSON gateway /rpc/<command> with a device token. Components never see the difference.
+
+/** Running inside the Tauri shell (the desktop window) rather than a phone browser. */
+export const IS_DESKTOP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const IS_PHONE = !IS_DESKTOP;
+
+export interface Transport {
+  call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+  listen<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn>;
+}
+
+/** The device token /pair issued, kept in the browser so a refresh doesn't pair again. */
+const TOKEN_KEY = "subcast.device.token";
+export const deviceToken = (): string => { try { return localStorage.getItem(TOKEN_KEY) ?? ""; } catch { return ""; } };
+export const setDeviceToken = (token: string | null) => {
+  try { if (token) localStorage.setItem(TOKEN_KEY, token); else localStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ }
+};
+
+/** 401: no token / expired / revoked — the gateway never says which. */
+export class Unauthorized extends Error { constructor() { super("unauthorized"); } }
+/** 403: the command is not in this version's whitelist. */
+export class Forbidden extends Error { constructor() { super("forbidden"); } }
+
+const desktopTransport: Transport = {
+  call: <T>(command: string, args?: Record<string, unknown>) => desktopInvoke<T>(command, args),
+  listen: <T>(event: string, handler: (payload: T) => void) => desktopListen<T>(event, (e) => handler(e.payload)),
+};
+
+const phoneTransport: Transport = {
+  async call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+    const token = deviceToken();
+    const res = await fetch(`/rpc/${encodeURIComponent(command)}`, {
+      method: "POST",
+      referrerPolicy: "same-origin",
+      keepalive: command === "set_progress" || command === "set_watched",
+      headers: { "Content-Type": "application/json", "X-Subcast-Client": "phone", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(args ?? {}),
+    });
+    if (res.status === 401) throw new Unauthorized();
+    if (res.status === 403) throw new Forbidden();
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      throw new Error(body?.error || `HTTP ${res.status}`);
+    }
+    return ((await res.json()) as { result: T }).result;
+  },
+  // Phone SSE subscriptions are scoped to the episode and request in mobile/phoneEvents.ts.
+  async listen<T>(_event: string, _handler: (payload: T) => void) { return () => {}; },
+};
+
+export const transport: Transport = IS_DESKTOP ? desktopTransport : phoneTransport;
+/** Backend call via the active transport (desktop invoke, phone gateway). */
+const invoke = <T>(command: string, args?: Record<string, unknown>) => transport.call<T>(command, args);
+
+/** One address the phone can open. `kind` is translated in the UI. */
+export interface RemoteUrl { kind: "lan" | "tailscale" | "loopback"; url: string }
+export interface RemoteStatus {
+  enabled: boolean;
+  port: number;
+  urls: RemoteUrl[];
+  /** The 6-digit pairing code while it is valid; null once used or expired. */
+  code: string | null;
+  codeExpiresAt: number;
+  /** How many phones are currently paired. */
+  devices: number;
+  pairedDevices: { id: number; label: string; pairedAt: number; lastSeen: number | null }[];
+  viewers: number;
+  nowPlaying: { episodeId: string; seconds: number; updatedAt: number } | null;
+}
+
+/** Why pairing failed, as the phone page shows it. */
+export type PairFailure = "invalid" | "expired" | "closed" | "locked" | "network" | "unknown";
+export class PairError extends Error { constructor(public reason: PairFailure) { super(reason); } }
+
+/** Phone page: exchange the 6-digit code for a device token (saved in localStorage). */
+export async function pairDevice(code: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch("/pair", { method: "POST", referrerPolicy: "same-origin", headers: { "Content-Type": "application/json", "X-Subcast-Client": "phone" }, body: JSON.stringify({ code, name: deviceName() }) });
+  } catch { throw new PairError("network"); }
+  if (res.ok) {
+    const body = (await res.json()) as { token?: string };
+    if (body.token) { setDeviceToken(body.token); return; }
+    throw new PairError("unknown");
+  }
+  if (res.status === 401) throw new PairError("invalid");
+  if (res.status === 410) throw new PairError("expired");
+  if (res.status === 503) throw new PairError("closed");
+  if (res.status === 429) throw new PairError("locked");
+  throw new PairError("unknown");
+}
+
+/** Friendly device label shown on the desktop after pairing. */
+const deviceName = () => {
+  const ua = navigator.userAgent;
+  if (/iPad|Macintosh/.test(ua) && navigator.maxTouchPoints > 1) return "iPad";
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/Android/.test(ua)) return "Android";
+  return ua.slice(0, 60);
+};
 
 /** A match inside one show: which part of the episode matched, a few words around it, and for subtitles the time. */
 /** One day-hour of listening to one episode (from the player; seeks don't count). */
@@ -47,6 +151,9 @@ export interface Episode {
 
 export interface Segment { start: number; end: number; text: string }
 export interface Transcript { episodeId: string; source: string; language: string; segments: Segment[] }
+/** What the phone can't read itself: a downloaded copy lives on the computer only, and the Chinese translation
+ *  sits in a desktop blob. `zh` lines match `segments` index by index (null where a line has no translation). */
+export interface ReadingHints { offline: boolean; zh: (string | null)[] | null }
 export interface SearchResult { title: string; author: string; cover?: string; feedUrl: string; genre?: string; episodes?: number; /** "youtube" for a YouTube channel; absent for an Apple Podcasts show. */ source?: "youtube" }
 export interface ModelInfo { id: string; name: string; sizeMb: number; note: string; installed: boolean; /** Another app's copy, used in place (no download). */ from?: string | null }
 export interface Provider { id: string; name: string; protocol: "openai" | "anthropic" | "cli"; baseUrl: string; model: string; needsKey: boolean; keyUrl?: string; models?: string[]; group?: "relay" | "provider" | "local" | "cli" }
@@ -112,18 +219,25 @@ export const api = {
   refreshShow: (id: string) => invoke<Show>("refresh_show", { id }),
   setMenuLabels: (labels: string[]) => invoke<void>("set_menu_labels", { labels }),
   refreshAll: () => invoke<{ shows: number; newEpisodes: number; skipped: boolean }>("refresh_all"),
+  checkPhoneSession: () => invoke<void>("phone_presence"),
+  askPhoneEpisode: (episodeId: string, question: string) => invoke<string>("ask_episode", { episodeId, question }),
   listShows: () => invoke<Show[]>("list_shows"),
   listEpisodes: (showId?: string, limit?: number) => invoke<Episode[]>("list_episodes", { showId, limit }),
   recentEpisodes: () => invoke<Episode[]>("recent_episodes"),
   getEpisode: (id: string) => invoke<Episode | null>("get_episode", { id }),
   removeShow: (id: string, keepEpisodeId?: string) => invoke<void>("remove_show", { id, keepEpisodeId }),
   setProgress: (id: string, seconds: number) => invoke<void>("set_progress", { id, seconds }),
+  savePhoneProgress: (id: string, seconds: number, playing: boolean, ageMs: number) =>
+    invoke<boolean>("set_progress", { id, seconds, playing, ageMs }),
+  finishPhoneEpisode: (id: string, ageMs: number) => invoke<boolean>("set_watched", { id, watched: "done", ageMs }),
   setWatched: (id: string, watched: "done" | "unseen" | null) => invoke<void>("set_watched", { id, watched }),
   markShowWatched: (showId: string) => invoke<number>("mark_show_watched", { showId }),
   searchShow: (showId: string, query: string) => invoke<ShowHit[]>("search_show", { showId, query }),
   searchPodcasts: (term: string, country?: string) => invoke<SearchResult[]>("search_podcasts", { term, country }),
   youtubeChannelFeed: (videoId: string) => invoke<string>("youtube_channel_feed", { videoId }),
   loadTranscript: (episodeId: string) => invoke<Transcript | null>("load_transcript", { episodeId }),
+  /** Phone page: whether a downloaded copy exists (not playable there) and the subtitles' Chinese translation. */
+  readingHints: (episodeId: string) => invoke<ReadingHints>("reading_hints", { episodeId }),
   fetchOfficialTranscript: (episodeId: string) => invoke<Transcript | null>("fetch_official_transcript", { episodeId }),
   transcribe: (episodeId: string, model: string, language: string, cloud?: CloudAsr) => invoke<Transcript>("transcribe", { episodeId, model, language, cloud: cloud ?? null }),
   cancelJob: (id: string) => invoke<void>("cancel_job", { id }),
@@ -205,6 +319,15 @@ export const api = {
   videoClipPrepare: (jobId: string, videoId: string, start: number, end: number, ranges?: [number, number][]) => invoke<PreparedClip>("video_clip_prepare", { jobId, videoId, start, end, ranges: ranges ?? null }),
   videoClipRender: (jobId: string, req: RenderVideoClipRequest) => invoke<RenderVideoClipResult>("video_clip_render", { jobId, req }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
+  /** 手机访问：开关状态（含可打开地址与配对码）。 */
+  revokePhone: (deviceId: number | null) => invoke<RemoteStatus>("remote_revoke", { deviceId }),
+  remoteStatus: () => invoke<RemoteStatus>("remote_status"),
+  /** 打开手机访问（额外的局域网监听 + 新配对码）。 */
+  enableRemote: () => invoke<RemoteStatus>("remote_enable"),
+  /** 关闭手机访问：停止监听并吊销全部令牌。 */
+  disableRemote: () => invoke<RemoteStatus>("remote_disable"),
+  /** 重新生成配对码。 */
+  regenerateRemoteCode: () => invoke<RemoteStatus>("remote_regenerate"),
 };
 
 let llmCounter = 0;
@@ -229,9 +352,9 @@ export async function llmChat(opts: {
   // "streaming" after the answer is done.
   let pending = 0;
   if (opts.onDelta) {
-    unlisten = await listen<{ requestId: string; delta: string }>("llm", (ev) => {
-      if (ev.payload.requestId !== requestId) return;
-      full += ev.payload.delta;
+    unlisten = await transport.listen<{ requestId: string; delta: string }>("llm", (payload) => {
+      if (payload.requestId !== requestId) return;
+      full += payload.delta;
       if (!pending) pending = window.setTimeout(() => { pending = 0; opts.onDelta!(full); }, 40);
     });
   }

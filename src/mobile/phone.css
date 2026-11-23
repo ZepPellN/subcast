@@ -1,0 +1,153 @@
+/* The phone page (issue #2). Loaded only in the browser build path, so it doesn't touch the desktop app's CSS. */
+.phone {
+  height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: max(20px, env(safe-area-inset-top)) 18px max(24px, env(safe-area-inset-bottom));
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 var(--font);
+}
+.ph-brand { font-size: 13px; font-weight: 600; letter-spacing: 0.08em; color: var(--accent); text-transform: uppercase; margin: 0; }
+.ph-title { font-size: 26px; font-weight: 650; margin: 8px 0 0; }
+.ph-title.sm { font-size: 20px; }
+.ph-muted { color: var(--muted); font-size: 14px; }
+.ph-pair { max-width: 420px; margin: 8vh auto 0; }
+.ph-pair .ph-muted { margin-top: 12px; }
+.ph-form { display: flex; flex-direction: column; gap: 12px; margin-top: 22px; }
+.ph-code-input {
+  height: 64px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: center;
+  font-size: 32px;
+  font-weight: 600;
+  letter-spacing: 0.32em;
+  padding: 0 10px 0 20px;
+  outline: none;
+}
+.ph-code-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.ph-btn {
+  height: 48px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: var(--soft);
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ph-btn.primary { background: var(--ink); color: var(--on-ink); }
+.ph-btn.ghost { height: 34px; padding: 0 12px; font-size: 13px; font-weight: 500; background: transparent; border-color: var(--line); color: var(--text-2); }
+.ph-btn:disabled { opacity: 0.5; }
+.ph-error { margin-top: 14px; color: var(--danger); font-size: 14px; }
+.ph-hint { margin-top: 18px; color: var(--muted); font-size: 12.5px; }
+.ph-list-page { padding-top: max(16px, env(safe-area-inset-top)); }
+.ph-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.ph-head-actions { display: flex; gap: 8px; flex: none; }
+.ph-note { margin: 14px 0 16px; color: var(--muted); font-size: 12.5px; }
+.ph-loading { padding: 32px 0; text-align: center; }
+.ph-shows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.ph-show { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.ph-cover { width: 52px; height: 52px; border-radius: 10px; object-fit: cover; flex: none; background: var(--soft); }
+.ph-cover-empty { display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 600; color: var(--muted); }
+.ph-show-text { min-width: 0; }
+.ph-show-title { font-size: 15px; font-weight: 600; margin: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ph-show-meta { font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ph-badge { padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 11.5px; font-weight: 600; }
+
+/* ---- one episode (issue #3) ---- */
+/* The page itself doesn't scroll: the player stays put and the subtitle list scrolls under it. */
+.ph-ep { height: 100%; overflow: hidden; display: flex; flex-direction: column; padding: max(8px, env(safe-area-inset-top)) 0 0; }
+.ph-ep-head { flex: none; display: flex; align-items: flex-start; gap: 4px; padding: 0 14px 8px; }
+.ph-ep-head-text { min-width: 0; }
+.ph-ep-show { margin: 0; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ph-ep-title { margin: 2px 0 0; font-size: 17px; font-weight: 650; line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ph-back { width: 36px; height: 36px; margin: 0 0 0 -8px; border: 0; border-radius: 50%; background: transparent; color: var(--text-2); display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.ph-back:active { background: var(--soft); }
+.ph-ep-pad { padding: 0 14px; }
+
+.ph-player { flex: none; margin: 2px 14px 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+.ph-player audio { display: none; }
+.ph-player-row { display: flex; align-items: center; gap: 12px; }
+.ph-play { width: 46px; height: 46px; flex: none; border: 0; border-radius: 50%; background: var(--ink); color: var(--on-ink); display: inline-flex; align-items: center; justify-content: center; }
+.ph-play:disabled { opacity: 0.4; }
+.ph-play:active:not(:disabled) { transform: scale(0.96); }
+.ph-player-timeline { flex: 1; min-width: 0; }
+.ph-range { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 22px; margin: 0; background: transparent; }
+.ph-range::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--line-strong); }
+.ph-range::-webkit-slider-thumb { -webkit-appearance: none; width: 15px; height: 15px; margin-top: -5.5px; border-radius: 50%; background: var(--text); border: 2px solid var(--panel); box-shadow: 0 0 0 1px var(--line-strong); }
+.ph-range::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line-strong); }
+.ph-range::-moz-range-thumb { width: 13px; height: 13px; border-radius: 50%; background: var(--text); border: 2px solid var(--panel); }
+.ph-player-times { display: flex; justify-content: space-between; margin-top: -2px; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+.ph-degrade { flex: none; margin: 2px 14px 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+.ph-degrade-text { min-width: 0; }
+.ph-degrade-title { margin: 0; font-size: 14.5px; font-weight: 650; line-height: 1.4; }
+.ph-degrade-hint { margin: 3px 0 0; font-size: 12.5px; }
+
+.ph-subs { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.ph-sub-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 14px 6px; }
+.ph-sub-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.ph-sub-tools { display: flex; align-items: center; gap: 4px; }
+.ph-tool { min-width: 34px; height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--text-2); font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+.ph-tool:disabled { opacity: 0.35; }
+.ph-tool:active:not(:disabled) { background: var(--soft); }
+.ph-sub-list { position: relative; flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4px 10px max(88px, env(safe-area-inset-bottom)); }
+.ph-sub-row { display: flex; gap: 10px; width: 100%; margin: 0; padding: 8px; border: 0; border-radius: 12px; background: transparent; color: var(--text); text-align: left; font-family: var(--font); }
+.ph-sub-row:active:not(.static) { background: var(--soft); }
+.ph-sub-row.active { background: var(--accent-soft); }
+.ph-sub-row.active .ph-sub-text { color: var(--accent-text); font-weight: 600; }
+.ph-sub-row.static { cursor: default; }
+.ph-sub-time { flex: none; min-width: 34px; padding-top: 1px; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; line-height: calc(var(--sub-size, 16px) * var(--sub-lh, 1.6)); }
+.ph-sub-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ph-sub-text { font-size: var(--sub-size, 16px); line-height: var(--sub-lh, 1.6); }
+.ph-sub-zh { font-size: calc(var(--sub-size, 16px) * 0.92); line-height: var(--sub-lh, 1.6); color: var(--text-2); }
+.ph-sub-row.active .ph-sub-zh { color: var(--accent-text); }
+.ph-sub-empty { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 28px 16px; text-align: center; }
+.ph-follow { position: absolute; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 2; padding: 8px 16px; border: 0; border-radius: 999px; background: var(--ink); color: var(--on-ink); font-size: 13px; font-weight: 600; box-shadow: var(--shadow); }
+
+/* ---- a show's episodes ---- */
+.ph-show { display: block; padding: 0; }
+.ph-row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 4px; border: 0; background: transparent; color: var(--text); text-align: left; }
+.ph-row:active { background: var(--soft); }
+.ph-show-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ph-show-title { display: block; }
+.ph-chevron { flex: none; color: var(--muted); }
+.ph-show-head { align-items: center; gap: 8px; margin-bottom: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.ph-show-head-text { flex: 1; min-width: 0; }
+.ph-count { flex: none; font-size: 12.5px; }
+.ph-ep-rows { list-style: none; margin: 0; padding: 0; }
+.ph-ep-row-wrap { border-bottom: 1px solid var(--line); }
+.ph-ep-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 12px 4px; border: 0; background: transparent; color: var(--text); text-align: left; }
+.ph-ep-row:active { background: var(--soft); }
+.ph-ep-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ph-ep-row-title { font-size: 15px; font-weight: 600; line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ph-ep-row-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }
+.ph-progress { display: block; height: 3px; margin-top: 2px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.ph-progress > span { display: block; height: 100%; background: var(--text-2); }
+.ph-badge.muted { background: var(--soft); color: var(--muted); }
+
+.ph-chat { display: grid; gap: 10px; min-width: 0; }
+.ph-ep [hidden] { display: none; }
+.ph-tabs { flex: none; display: flex; gap: 8px; padding: 0 14px 10px; }
+.ph-tabs .ph-btn[aria-pressed="true"] { background: var(--soft); color: var(--text); }
+.ph-chat-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 14px max(24px, env(safe-area-inset-bottom)); }
+.ph-chat p { margin: 0; }
+.ph-chat form { display: grid; gap: 8px; justify-items: start; }
+.ph-chat form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+}
+.ph-answer { display: grid; gap: 10px; justify-items: start; }
+.ph-answer p { overflow-wrap: anywhere; white-space: pre-wrap; }
+.ph-copy-buffer { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }

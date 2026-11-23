@@ -2547,3 +2547,18 @@ details.vclip-sec[open] > summary.vclip-sec-head > .small { visibility: hidden; 
 .menu.clip-hist .clip-hist-main:hover { background: none; }
 .menu.clip-hist .icon-btn { width: 26px; height: 26px; padding: 0; display: inline-grid; place-items: center; flex: none; }
 .menu.clip-hist .menu-note { margin: 4px 8px 2px; }
+
+/* ---- 设置 › 手机访问（remote.rs, issue #2）---- */
+.remote-panel { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; margin-top: 10px; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.remote-code { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 190px; }
+.remote-code-digits { font: 600 30px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.12em; color: var(--text); }
+.remote-qr { width: 148px; height: 148px; padding: 6px; border-radius: 10px; background: #fff; flex: none; }
+.remote-urls { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; flex: 1 1 250px; min-width: 0; }
+.remote-urls li { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.remote-url-kind { flex: none; padding: 1px 7px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: 11.5px; }
+.remote-urls code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.remote-devices { flex: 1 0 100%; min-width: 0; }
+.remote-devices ul { list-style: none; margin: 0 0 10px; padding: 0; }
+.remote-devices li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.remote-devices p { margin: 0 0 4px; }

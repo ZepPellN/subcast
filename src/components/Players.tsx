@@ -35,10 +35,10 @@ useStore.subscribe((s, prev) => {
   const p = s.player;
   // A seek asked for before the player existed (a chapter link in the notes) starts playback from there.
   if (s.seekWhenReady && s.seekWhenReady.id === s.current?.id) {
-    const { at } = s.seekWhenReady;
+    const { at, autoplay } = s.seekWhenReady;
     const play = s.playWhenReady === s.current?.id;
     useStore.setState({ seekWhenReady: null, playWhenReady: null });
-    window.setTimeout(() => { p.seek(at); if (play) p.play(); }, 0);
+    window.setTimeout(() => { p.seek(at, autoplay); if (play) p.play(); }, 0);
   } else if (s.playWhenReady && s.current?.id === s.playWhenReady) {
     useStore.setState({ playWhenReady: null });
     window.setTimeout(() => p.play(), 0);
@@ -143,7 +143,7 @@ export function AudioEngine() {
     const el = ref.current;
     if (!el || !audio) return;
     const handle = {
-      seek: (t: number) => { el.currentTime = toPlay(mapOf(audio.id), t); el.play().catch(() => {}); },
+      seek: (t: number, autoplay = true) => { el.currentTime = toPlay(mapOf(audio.id), t); if (autoplay) void el.play().catch(() => {}); },
       seekRaw: (t: number) => { el.currentTime = t; el.play().catch(() => {}); },
       toggle: () => (el.paused ? void el.play().catch(() => {}) : el.pause()),
       play: () => void el.play().catch(() => {}),
@@ -407,7 +407,7 @@ function EmbedVideo({ ep, onFullscreen, onBlocked, onError }: { ep: Episode; onF
             player.setPlaybackRate?.(useStore.getState().settings.playbackRate);
             handle = {
               episodeId: ep.id,
-              seek: (t: number) => { player.seekTo(t, true); player.playVideo(); },
+              seek: (t: number, autoplay = true) => { player.seekTo(t, true); if (autoplay) player.playVideo(); else player.pauseVideo(); },
               toggle: () => (player.getPlayerState() === 1 ? player.pauseVideo() : (waiting(true), player.playVideo())),
               play: () => { waiting(true); player.playVideo(); },
               setRate: (r: number) => player.setPlaybackRate(r),
@@ -489,7 +489,7 @@ function NativeVideo({ ep, src, kind, onFullscreen, onFail }: { ep: Episode; src
       hls.attachMedia(el);
     });
     const handle = {
-      seek: (t: number) => { el.currentTime = t; void el.play().catch(() => {}); },
+      seek: (t: number, autoplay = true) => { el.currentTime = t; if (autoplay) void el.play().catch(() => {}); },
       toggle: () => (el.paused ? void el.play().catch(() => {}) : el.pause()),
       play: () => void el.play().catch(() => {}),
       setRate: (r: number) => { el.playbackRate = r; },

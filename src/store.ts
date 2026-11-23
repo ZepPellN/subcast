@@ -18,8 +18,8 @@ export type View =
   | { kind: "settings" };
 
 export interface PlayerHandle {
-  /** To a subtitle time. */
-  seek(seconds: number): void;
+  /** To a subtitle time. Pass false when restoring a paused position. */
+  seek(seconds: number, autoplay?: boolean): void;
   /** To a time on the player's own clock (the progress bar), when it differs from subtitle time. */
   seekRaw?(seconds: number): void;
   toggle(): void;
@@ -61,7 +61,7 @@ interface State {
   /** Play as soon as the player for `current` is ready (it may take a few seconds to appear). */
   playWhenReady?: string | null;
   /** Seek here as soon as this episode's player appears. */
-  seekWhenReady?: { id: string; at: number } | null;
+  seekWhenReady?: { id: string; at: number; autoplay?: boolean } | null;
   /** First run: show the welcome card; shows are being subscribed in the background. */
   welcome?: boolean;
   settingUp?: boolean;
@@ -226,10 +226,10 @@ export function withdrawPlayer(h: PlayerHandle & { episodeId: string }) {
 }
 
 /** Seeks once the current episode's player exists (a video's player takes a moment to appear). */
-export function seekSoon(seconds: number) {
+export function seekSoon(seconds: number, autoplay = true) {
   const s = useStore.getState();
-  if (s.player) { s.player.seek(seconds); return; }
-  if (s.current) s.set({ time: seconds, seekWhenReady: { id: s.current.id, at: seconds } });
+  if (s.player) { s.player.seek(seconds, autoplay); return; }
+  if (s.current) s.set({ time: seconds, seekWhenReady: { id: s.current.id, at: seconds, autoplay } });
 }
 
 let settingsTimer = 0;
