@@ -16,6 +16,7 @@ import { useStore } from "../store";
 import { bytes, clearAudioCache, clearDownloads, useOffline } from "../lib/offline";
 import { HomeShowCard } from "./YtPromo";
 import { YouTubeAccount } from "./YouTubeAccount";
+import { RemoteAccess } from "./RemoteAccess";
 import { useModelDownload } from "./TranscriptPanel";
 import { LANGS, systemLang, t, tk, tr, type LangSetting, IS_MAC, kbd, isChineseUi } from "../lib/i18n";
 import { ModelSettings } from "./ModelSettings";
@@ -259,6 +260,7 @@ export function SettingsView() {
                   </select>
                 </label>
               </section>
+              <RemoteAccess />
               <section className="setup-block">
                 <p className="setup-title">{t("共享")}</p>
                 <label className="check"><input type="checkbox" checked={settings.shareTranscripts} onChange={(e) => saveSettings({ shareTranscripts: e.target.checked })} /> {t("匿名分享我生成的字幕、译文和导读")}</label>
