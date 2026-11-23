@@ -201,7 +201,7 @@ impl Gateway {
     fn now(&self) -> i64 { (self.clock)() }
 
     /// Open the registry on explicit opt-in. Reading it never starts a listener.
-    pub fn open_device_store(&self, path: &Path) -> rusqlite::Result<()> {
+    pub fn open_device_store(&self, path: &Path, fresh_session: bool) -> rusqlite::Result<()> {
         let mut g = self.inner.lock().unwrap();
         if g.enabled { return Ok(()); }
         let conn = Connection::open(path)?;
@@ -211,7 +211,7 @@ impl Gateway {
                 id INTEGER PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
                 paired_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_seen INTEGER);",
         )?;
-        if g.stores_pending_clear.contains(path) {
+        if fresh_session || g.stores_pending_clear.contains(path) {
             conn.execute("DELETE FROM remote_devices", [])?;
             g.stores_pending_clear.remove(path);
         }
@@ -832,7 +832,7 @@ impl Remote {
             // 一个地址都绑不上：保持关闭，让界面把原因说清楚。
             return Ok(self.status_locked(&s));
         };
-        if let Some(path) = storage { self.gw.open_device_store(path)?; }
+        if let Some(path) = storage { self.gw.open_device_store(path, false)?; }
         let servers: Vec<_> = listeners.into_iter().filter_map(|(ip, listener)|
             self.start_listener(ip, listener, &files, &commands, None)
         ).collect();
@@ -855,7 +855,7 @@ impl Remote {
         let address = Ipv4Addr::LOCALHOST;
         let listener = TcpListener::bind((address, port)).map_err(|_| "access_port_in_use")?;
         let port = listener.local_addr().map_err(|_| "access_port_in_use")?.port();
-        if let Some(path) = storage { self.gw.open_device_store(path).map_err(|_| "access_store_unavailable")?; }
+        if let Some(path) = storage { self.gw.open_device_store(path, true).map_err(|_| "access_store_unavailable")?; }
         let url = access.settings().public_url.clone();
         let handle = self.start_listener(address, listener, &files, &commands, Some(access))
             .ok_or("access_port_in_use")?;
@@ -1451,7 +1451,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("subcast-devices-{}.db", uuid::Uuid::new_v4()));
         let token = {
             let (_, gateway) = new_gw();
-            gateway.open_device_store(&path).unwrap();
+            gateway.open_device_store(&path, false).unwrap();
             let pair = gateway.pair(&gateway.enable().code.unwrap(), "iPhone").unwrap();
             let store = Connection::open(&path).unwrap();
             let stored: String = store.query_row("SELECT token_hash FROM remote_devices", [], |row| row.get(0)).unwrap();
@@ -1460,12 +1460,12 @@ mod tests {
             pair.token
         };
         let (_, gateway) = new_gw();
-        gateway.open_device_store(&path).unwrap();
+        gateway.open_device_store(&path, false).unwrap();
         assert!(!gateway.authorize(&token));
         gateway.enable();
         assert!(gateway.authorize(&token));
         gateway.disable().unwrap();
-        gateway.open_device_store(&path).unwrap();
+        gateway.open_device_store(&path, false).unwrap();
         gateway.enable();
         assert!(!gateway.authorize(&token));
         drop(gateway);
@@ -1566,13 +1566,13 @@ mod tests {
         let https = dir.join("https.db");
 
         let (_, other) = new_gw();
-        other.open_device_store(&lan).unwrap();
+        other.open_device_store(&lan, false).unwrap();
         let lan_code = other.enable().code.unwrap();
         let lan_token = other.pair(&lan_code, "Existing LAN device").unwrap().token;
         drop(other);
 
         let (_, gateway) = new_gw();
-        gateway.open_device_store(&https).unwrap();
+        gateway.open_device_store(&https, true).unwrap();
         let https_code = gateway.activate(true).code.unwrap();
         let https_token = gateway.pair_for(&https_code, "HTTPS device", true).unwrap().token;
         let db = Connection::open(&https).unwrap();
@@ -1580,21 +1580,42 @@ mod tests {
             BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;").unwrap();
         assert!(gateway.disable().is_err());
 
-        gateway.open_device_store(&lan).unwrap();
+        gateway.open_device_store(&lan, false).unwrap();
         gateway.enable();
         assert!(gateway.authorize(&lan_token));
         assert!(!gateway.authorize(&https_token));
         gateway.disable().unwrap();
 
+        // Restart with a failed revoke still on disk: HTTPS refuses to start until it can clear the registry.
+        drop(gateway);
+        let (_, restarted) = new_gw();
+        assert!(restarted.open_device_store(&https, true).is_err());
         db.execute_batch("DROP TRIGGER reject_delete;").unwrap();
-        gateway.open_device_store(&https).unwrap();
-        gateway.activate(true);
-        assert!(gateway.authorize_device(&https_token, true).is_none());
-        gateway.disable().unwrap();
+        restarted.open_device_store(&https, true).unwrap();
+        restarted.activate(true);
+        assert!(restarted.authorize_device(&https_token, true).is_none());
+        restarted.disable().unwrap();
         drop(db);
         std::fs::remove_file(lan).unwrap();
         std::fs::remove_file(https).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn no_sse_event_is_emitted_after_access_expires() {
+        let (_, gateway) = new_gw();
+        let code = gateway.activate(true).code.unwrap();
+        let token = gateway.pair_for(&code, "HTTPS device", true).unwrap().token;
+        let device = gateway.authorize_device(&token, true).unwrap();
+        let slot = gateway.events.connect(device).unwrap();
+        gateway.note_asr("e1", json!({"episodeId": "e1", "progress": 0.5}));
+        let expiry = chrono::Utc::now().timestamp();
+        let stream = Stream::new(gateway, device, "e1".into(), None, 0, slot, Some(expiry));
+        let mut response = Vec::new();
+        stream.write_to(&mut response);
+        let response = String::from_utf8(response).unwrap();
+        assert!(!response.contains("event: asr"));
+        assert!(response.ends_with("0\r\n\r\n"));
     }
 
     #[test]

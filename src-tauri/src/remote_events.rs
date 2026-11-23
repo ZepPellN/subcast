@@ -152,10 +152,14 @@ impl Stream {
             last_asr: None, started: Instant::now(), access_expiry, next_ping: Instant::now(), done: false, _slot: slot }
     }
 
+    fn access_expired(&self) -> bool {
+        self.access_expiry.is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp())
+    }
+
     fn frame(&mut self) -> Option<String> {
         loop {
             if self.done || self.started.elapsed() >= STREAM_TIMEOUT || !self.gateway.device_active(self.device)
-                || self.access_expiry.is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp()) {
+                || self.access_expired() {
                 return None;
             }
             if let Some((request, answer)) = &self.question {
@@ -186,6 +190,7 @@ impl Stream {
             writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nTransfer-Encoding: chunked\r\n\r\n")?;
             writer.flush()?;
             while let Some(frame) = self.frame() {
+                if self.access_expired() { break; }
                 write!(writer, "{:x}\r\n", frame.len())?;
                 writer.write_all(frame.as_bytes())?;
                 writer.write_all(b"\r\n")?;

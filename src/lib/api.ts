@@ -237,9 +237,8 @@ export const api = {
   getEpisode: (id: string) => invoke<Episode | null>("get_episode", { id }),
   removeShow: (id: string, keepEpisodeId?: string) => invoke<void>("remove_show", { id, keepEpisodeId }),
   setProgress: (id: string, seconds: number) => invoke<void>("set_progress", { id, seconds }),
-  savePhoneProgress: (id: string, seconds: number, playing: boolean, ageMs: number) =>
-    invoke<boolean>("set_progress", { id, seconds, playing, ageMs }),
-  finishPhoneEpisode: (id: string, ageMs: number) => invoke<boolean>("set_watched", { id, watched: "done", ageMs }),
+  savePhoneProgress: (id: string, seconds: number, playing: boolean, ageMs: number, finished: boolean) =>
+    invoke<boolean>("set_progress", { id, seconds, playing, ageMs, finished }),
   setWatched: (id: string, watched: "done" | "unseen" | null) => invoke<void>("set_watched", { id, watched }),
   markShowWatched: (showId: string) => invoke<number>("mark_show_watched", { showId }),
   searchShow: (showId: string, query: string) => invoke<ShowHit[]>("search_show", { showId, query }),

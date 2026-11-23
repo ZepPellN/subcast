@@ -871,7 +871,8 @@ impl remote::Commands for AppCommands {
                 let seconds = args.get("seconds").and_then(Value::as_f64).ok_or_else(bad_args)?;
                 if !seconds.is_finite() || seconds < 0.0 { return Err(bad_args()); }
                 let age = args.get("ageMs").and_then(Value::as_i64).unwrap_or(0).clamp(0, remote::TOKEN_TTL_MS);
-                let applied = db::write_progress(&state.db.lock().unwrap(), id, seconds, now_ms() - age).map_err(e)?;
+                let finished = args.get("finished").and_then(Value::as_bool).unwrap_or(false);
+                let applied = db::write_progress(&state.db.lock().unwrap(), id, seconds, now_ms() - age, finished).map_err(e)?;
                 Ok(json!(applied))
             }
             // issue #4：已看状态。只接受 done / unseen / null，别的取值一律不写。

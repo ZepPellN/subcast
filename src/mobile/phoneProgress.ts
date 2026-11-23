@@ -40,9 +40,8 @@ export async function syncPhoneProgress() {
   try {
     for (const [id, position] of Object.entries(pending)) {
       if (deviceToken() !== token) break;
-      const age = () => Math.max(0, Date.now() - (position.savedAt ?? Date.now()));
-      const applied = await api.savePhoneProgress(id, position.seconds, position.playing, age());
-      if (applied && position.finished && deviceToken() === token) await api.finishPhoneEpisode(id, age());
+      const age = Math.max(0, Date.now() - (position.savedAt ?? Date.now()));
+      await api.savePhoneProgress(id, position.seconds, position.playing, age, position.finished);
       if (pending[id] === position) { delete pending[id]; persist(); }
     }
     if (!getAccessLoginRequired() && Object.keys(pending).length) retry = window.setTimeout(syncPhoneProgress, 0);

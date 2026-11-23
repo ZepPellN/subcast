@@ -51,7 +51,7 @@ cloudflared tunnel --config ~/.cloudflared/subcast-phone.yml run subcast-phone
 
 在桌面 SubCast 的 **设置 → 通用 → 手机访问** 中选择 **跨网络 HTTPS**。填写公开 HTTPS 地址（例如 `https://phone.example.com`，只填站点根地址）、Access 团队名称、应用 AUD 和同一个所有者邮箱。勾选 **允许手机通过 HTTPS 访问** 并确认。这四项非凭据配置保存到已有的本地 SQLite 中。
 
-在手机浏览器打开 `https://phone.example.com`，用所有者邮箱登录 Access，再输入桌面显示的 6 位配对码。公开网址和配对码分开分享。配对码 5 分钟内有效且只能使用一次，设备令牌从配对起有效 7 天，也可在桌面提前撤销。
+在手机浏览器打开 `https://phone.example.com`，用所有者邮箱登录 Access，再输入桌面显示的 6 位配对码。公开网址和配对码分开分享。配对码 5 分钟内有效且只能使用一次，设备令牌在本次 HTTPS 开启期间有效，最长 7 天。关闭再开启或重启桌面 App 后需重新配对。
 
 HTTPS 源站在提供页面、资源、配对、RPC 和 SSE 之前验证 Access JWT 的 RS256 签名、签发方、应用受众、时间声明（`exp`、存在时的 `nbf`）和所有者邮箱。RPC 和 SSE 还需要设备令牌。Access 过期时，浏览器里的请求可能收到登录重定向或源站的 `401 {"error":"access_required"}`。按 **刷新并登录**，继续用同一域名和浏览器。有效的设备配对和待同步进度会保留，重连后按原有进度同步规则提交。Access 有效时收到设备 `401 {"error":"unauthorized"}` 则需要重新配对。
 
@@ -70,7 +70,7 @@ HTTPS 手机页直接播放手机可访问的 HTTPS 原始音频。旧的 HTTP �
 
 - [ ] 手机使用蜂窝网或另一处 Wi-Fi，VPN 保持连接。用新的浏览器会话打开公开网址，确认先到 Access。非所有者邮箱无法进入，所有者登录后使用 6 位码配对，刷新不要求重新配对。
 - [ ] 打开有可用 HTTPS 音频和字幕的单集，验证播放、字幕跳转、暂停和桌面端进度。刷新后验证续听。打开只有 HTTP 直链的单集，验证提示、字幕和问答入口。
-- [ ] 提问并确认答案随生成逐段出现。检查 `/events` 返回 `Content-Type: text/event-stream`，并确认公开主机的响应未命中边缘缓存。Access JWT 到期时，现有流须在到期时结束。 [Cloudflare Tunnel 与 SSE](https://developers.cloudflare.com/tunnel/troubleshooting/#cloudflare-tunnel-is-buffering-my-streaming-response-instead-of-streaming-it-live)
+- [ ] 提问并确认答案随生成逐段出现。检查 `/events` 返回 `Content-Type: text/event-stream`，并确认公开主机的响应未命中边缘缓存。临近 Access JWT 到期时，用未转写单集保持一条只接收转写进度的 SSE 连接，核对到期后不再发送新事件，正常连接随后结束。避免把答完或 120 秒的重连当成到期。 [Cloudflare Tunnel 与 SSE](https://developers.cloudflare.com/tunnel/troubleshooting/#cloudflare-tunnel-is-buffering-my-streaming-response-instead-of-streaming-it-live)
 - [ ] 保持已配对页面打开，等待短会话到期，或在 Access 撤销测试会话。触发一次进度回写或问答，确认页面提示刷新登录。点击按钮并完成登录，确认无需新配对码，待同步进度随后出现在桌面。若现有身份会话自动续签，可用同一浏览器先退出 Access 会话再重试，保留 SubCast 站点数据。
 - [ ] Access 登录仍有效时，在 SubCast 桌面撤销该设备，确认手机下一次鉴权请求提示重新配对。关闭 HTTPS 模式后确认公开域名无法再访问 SubCast。重新开启时确认旧设备授权仍然失效。
 - [ ] 切回局域网模式，在同一网络验证原 HTTP 配对和播放流程。
