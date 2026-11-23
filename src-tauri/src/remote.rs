@@ -1,16 +1,16 @@
-//! 手机访问（issue #2 / T1）：局域网里的手机浏览器用配对码换一个设备令牌，再通过 HTTP 网关读取订阅列表。
+//! 手机访问（issue #2 / T1、issue #3 / T2）：局域网里的手机浏览器用配对码换一个设备令牌，再通过 HTTP 网关
+//! 读取订阅、单集与字幕。
 //!
 //! 边界（刻意从严）：
 //! - **复用界面那个 HTTP 服务**：不另起服务。开关打开时在同一端口族上额外绑定局域网地址，请求都走
 //!   [`route`]；关闭时停掉这些监听并吊销全部令牌。
 //! - 配对码 6 位、5 分钟有效、**用过一次即作废**，可随时重新生成。
 //! - 设备令牌 7 天有效，**只存 SHA-256**；进程内记录，开关关闭即清空。
-//! - 网关只放行**硬编码白名单**（本票只有 `list_shows`），白名单外一律 403。
+//! - 网关只放行**硬编码白名单** [`ALLOWED`]：全部只读（订阅、单集、字幕、播放提示），白名单外一律 403。
 //! - 缺令牌 / 过期 / 已吊销 / 伪造：一律 401，响应体不区分原因。
 //! - 日志与错误信息不打印配对码、令牌。
 //!
-//! T1 的 `/rpc` 只用 `list_shows`，所以命令参数目前直接忽略；手机页没有事件流，
-//! 桌面端的事件在这里没有对应实现（T2 再说）。
+//! 手机页没有事件流，桌面端的事件在这里没有对应实现；手机端也不写回进度、设置或订阅。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,8 +27,10 @@ pub const TOKEN_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// 连续输错这么多次，锁一分钟再试。
 pub const MAX_PAIR_FAILS: u32 = 10;
 pub const LOCK_MS: i64 = 60 * 1000;
-/// 本票（T1）只放行的命令。桌面端有的命令不在表里也一律 403。
-pub const ALLOWED: &[&str] = &["list_shows"];
+/// 手机端放行的命令：全部**只读** —— 订阅列表、某档节目的单集、单集详情、字幕，以及决定「这期能不能播」
+/// 的提示（`reading_hints`）。写入类命令（进度、订阅、下载、设置、登录、打开文件）一个都不放行；
+/// 桌面端有的命令不在这张表里也一律 403。
+pub const ALLOWED: &[&str] = &["list_shows", "list_episodes", "get_episode", "load_transcript", "reading_hints"];
 /// 请求体上限，别让一个请求把内存吃掉。
 const MAX_BODY: usize = 16 * 1024;
 /// 端口族大小，与 lib.rs 的 UI_PORTS 保持一致（由调用方传入，这里只做兜底）。
@@ -277,6 +279,17 @@ fn bearer(header: Option<&str>) -> Option<&str> {
     let h = header?.trim();
     let rest = h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer "))?;
     Some(rest.trim())
+}
+
+/// 手机端自己读不到的两件事：这期是否已经下载到电脑上（下载的是本地文件，手机上放不了），
+/// 以及字幕的中文译文（桌面上存在 blob `zh` 里，和 segments 一一对应，允许有没有译文的行）。
+/// 坏掉的 blob 当成没有，页面照常显示原文。
+pub fn reading_hints(offline: bool, zh: Option<&str>) -> Value {
+    let zh = zh
+        .and_then(|raw| serde_json::from_str::<Vec<Option<String>>>(raw).ok())
+        .map(|items| json!(items))
+        .unwrap_or(Value::Null);
+    json!({ "offline": offline, "zh": zh })
 }
 
 /// 只允许普通的相对路径，挡住 `..` 与编码过的变体。
@@ -618,10 +631,24 @@ mod tests {
         }
     }
 
-    struct FakeCommands { allowed: bool }
+    /// 记录收到的命令和参数，用来验证网关把参数原样交给了命令。
+    #[derive(Default)]
+    struct FakeCommands { allowed: bool, seen: Mutex<Vec<(String, Value)>> }
+    impl FakeCommands {
+        fn new(allowed: bool) -> Self { Self { allowed, ..Default::default() } }
+    }
     impl Commands for FakeCommands {
-        fn call(&self, command: &str, _args: Value) -> Result<Value, String> {
-            if command == "list_shows" { Ok(json!([{"id": "s1", "title": "节目一"}])) } else if self.allowed { Ok(json!(null)) } else { Err("forbidden".into()) }
+        fn call(&self, command: &str, args: Value) -> Result<Value, String> {
+            self.seen.lock().unwrap().push((command.to_string(), args.clone()));
+            match command {
+                "list_shows" => Ok(json!([{"id": "s1", "title": "节目一"}])),
+                "list_episodes" => Ok(json!([{"id": "e1", "hasTranscript": true}])),
+                "get_episode" => Ok(json!({"id": "e1", "title": "第一期", "audioUrl": "https://cdn.example/e1.mp3", "hasTranscript": true})),
+                "load_transcript" => Ok(json!({"episodeId": "e1", "source": "rss", "language": "en", "segments": [{"start": 0.0, "end": 2.0, "text": "hello"}]})),
+                "reading_hints" => Ok(json!({"offline": false, "zh": ["你好"]})),
+                _ if self.allowed => Ok(json!(null)),
+                _ => Err("forbidden".into()),
+            }
         }
     }
 
@@ -630,6 +657,9 @@ mod tests {
     }
     fn rpc_req(command: &str, token: Option<&str>) -> HttpIn {
         HttpIn { method: "POST".into(), path: format!("/rpc/{command}"), authorization: token.map(|t| format!("Bearer {t}")), body: b"{}".to_vec() }
+    }
+    fn rpc_args_req(command: &str, token: Option<&str>, args: &Value) -> HttpIn {
+        HttpIn { method: "POST".into(), path: format!("/rpc/{command}"), authorization: token.map(|t| format!("Bearer {t}")), body: serde_json::to_vec(args).unwrap() }
     }
     fn new_gw() -> (Arc<AtomicI64>, Arc<Gateway>) {
         let (clock, c) = test_clock();
@@ -723,7 +753,7 @@ mod tests {
     fn rpc_needs_a_token_and_only_the_whitelist() {
         let (_clock, gw) = new_gw();
         let files = NoFiles;
-        let cmds = FakeCommands { allowed: false };
+        let cmds = FakeCommands::new(false);
         // 没令牌 → 401
         let r = route(&gw, &files, &cmds, &rpc_req("list_shows", None));
         assert_eq!(r.status, 401);
@@ -744,10 +774,90 @@ mod tests {
     }
 
     #[test]
+    fn phone_whitelist_reads_one_episode_and_never_writes() {
+        // 打开一期要用的全是只读命令：订阅、单集列表、单集详情、字幕、播放提示。
+        for name in ["list_shows", "list_episodes", "get_episode", "load_transcript", "reading_hints"] {
+            assert!(ALLOWED.contains(&name), "{name} 是手机打开一期必需的只读命令，应该放行");
+        }
+        // 写入、删除、本地文件、登录一类命令一个都不能出现。
+        for name in [
+            "add_subscription", "refresh_show", "refresh_all", "remove_show", "set_progress", "set_watched",
+            "mark_show_watched", "set_settings", "set_api_key", "set_blob", "transcribe", "cancel_job",
+            "fetch_official_transcript", "translate_texts", "download_episode", "delete_download",
+            "clear_downloads", "open_data_folder", "reveal_download", "reveal_file", "open_privacy_settings",
+            "youtube_sign_in", "youtube_sign_out", "save_image", "save_text", "export_anki", "share_guide",
+            "share_translation", "align_audio", "save_time_map", "clear_audio_cache", "clear_temp",
+        ] {
+            assert!(!ALLOWED.contains(&name), "{name} 不是只读命令，不能放行给手机");
+        }
+    }
+
+    #[test]
+    fn rpc_hands_episode_and_subtitle_arguments_through() {
+        let (_clock, gw) = new_gw();
+        let files = NoFiles;
+        let cmds = FakeCommands::new(false);
+        let code = gw.enable().code.unwrap();
+        let token = gw.pair(&code, "iPhone").unwrap().token;
+
+        let cases = [
+            ("list_episodes", json!({"showId": "s1"})),
+            ("get_episode", json!({"id": "e1"})),
+            ("load_transcript", json!({"episodeId": "e1"})),
+            ("reading_hints", json!({"episodeId": "e1"})),
+        ];
+        for (command, args) in cases {
+            let r = route(&gw, &files, &cmds, &rpc_args_req(command, Some(&token), &args));
+            assert_eq!(r.status, 200, "{command}: {}", String::from_utf8_lossy(&r.body));
+            let body: Value = serde_json::from_slice(&r.body).unwrap();
+            assert!(body.get("result").is_some(), "{command} 的结果要原样返回");
+        }
+        // 参数确实原样交给了命令（手机端传的是 camelCase）。
+        let seen = cmds.seen.lock().unwrap();
+        let names: Vec<&str> = seen.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["list_episodes", "get_episode", "load_transcript", "reading_hints"]);
+        assert_eq!(seen[0].1, json!({"showId": "s1"}));
+        assert_eq!(seen[1].1, json!({"id": "e1"}));
+        assert_eq!(seen[2].1, json!({"episodeId": "e1"}));
+        assert_eq!(seen[3].1, json!({"episodeId": "e1"}));
+    }
+
+    #[test]
+    fn write_commands_are_403_even_with_a_valid_token() {
+        let (_clock, gw) = new_gw();
+        let files = NoFiles;
+        let cmds = FakeCommands::new(true); // 桌面端「有这个命令」也不影响网关的判断
+        let code = gw.enable().code.unwrap();
+        let token = gw.pair(&code, "iPhone").unwrap().token;
+        for command in ["set_progress", "remove_show", "set_watched", "add_subscription", "set_settings", "delete_download"] {
+            let r = route(&gw, &files, &cmds, &rpc_args_req(command, Some(&token), &json!({"id": "e1"})));
+            assert_eq!(r.status, 403, "{command} 必须 403");
+            assert!(!String::from_utf8_lossy(&r.body).contains("token"));
+        }
+        // 这些请求根本没到命令层。
+        assert!(cmds.seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reading_hints_flag_offline_downloads_and_the_translation() {
+        // 下载过的音频在手机上放不了；中文译文和原文分段一一对应（可能有没有译文的行）。
+        let h = reading_hints(true, Some(r#"[null,"你好"]"#));
+        assert_eq!(h["offline"], true);
+        assert_eq!(h["zh"], json!([null, "你好"]));
+        // 没下载、没译文：页面只显示原文。
+        let h = reading_hints(false, None);
+        assert_eq!(h["offline"], false);
+        assert!(h["zh"].is_null());
+        // 坏掉的 blob 当没有，别让整页打不开。
+        let h = reading_hints(false, Some("not json"));
+        assert!(h["zh"].is_null());
+    }
+
+    #[test]
     fn closing_the_switch_makes_old_tokens_401() {
         let (_clock, gw) = new_gw();
         let files = NoFiles;
-        let cmds = FakeCommands { allowed: false };
+        let cmds = FakeCommands::new(false);
         let code = gw.enable().code.unwrap();
         let token = gw.pair(&code, "iPhone").unwrap().token;
         assert_eq!(route(&gw, &files, &cmds, &rpc_req("list_shows", Some(&token))).status, 200);
@@ -760,7 +870,7 @@ mod tests {
     fn pair_errors_are_told_apart() {
         let (_clock, gw) = new_gw();
         let files = NoFiles;
-        let cmds = FakeCommands { allowed: false };
+        let cmds = FakeCommands::new(false);
         let code = gw.enable().code.unwrap();
         // 码错
         let r = route(&gw, &files, &cmds, &pair_req("999999"));
@@ -784,7 +894,7 @@ mod tests {
     fn static_files_are_served_and_traversal_is_refused() {
         let (_clock, gw) = new_gw();
         let files = NoFiles;
-        let cmds = FakeCommands { allowed: false };
+        let cmds = FakeCommands::new(false);
         let get = |path: &str| HttpIn { method: "GET".into(), path: path.into(), authorization: None, body: vec![] };
         let r = route(&gw, &files, &cmds, &get("/"));
         assert_eq!(r.status, 200);
@@ -798,7 +908,7 @@ mod tests {
     #[test]
     fn enable_and_disable_over_real_http() {
         let files: Arc<dyn Files> = Arc::new(NoFiles);
-        let cmds: Arc<dyn Commands> = Arc::new(FakeCommands { allowed: false });
+        let cmds: Arc<dyn Commands> = Arc::new(FakeCommands::new(false));
         let remote = Remote::new();
         let st = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], files.clone(), cmds.clone());
         assert!(st.enabled, "回环也能开起来（测试环境）");
@@ -823,7 +933,7 @@ mod tests {
     #[test]
     fn enable_is_idempotent_and_regenerate_changes_the_code() {
         let files: Arc<dyn Files> = Arc::new(NoFiles);
-        let cmds: Arc<dyn Commands> = Arc::new(FakeCommands { allowed: false });
+        let cmds: Arc<dyn Commands> = Arc::new(FakeCommands::new(false));
         let remote = Remote::new();
         let a = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], files.clone(), cmds.clone());
         let b = remote.enable(0, PORT_FAMILY, vec![Ipv4Addr::LOCALHOST], files, cmds);
