@@ -39,16 +39,20 @@ const phoneTransport: Transport = {
     const token = deviceToken();
     const res = await fetch(`/rpc/${encodeURIComponent(command)}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      referrerPolicy: "same-origin",
+      keepalive: command === "set_progress" || command === "set_watched",
+      headers: { "Content-Type": "application/json", "X-Subcast-Client": "phone", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(args ?? {}),
     });
     if (res.status === 401) throw new Unauthorized();
     if (res.status === 403) throw new Forbidden();
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      throw new Error(body?.error || `HTTP ${res.status}`);
+    }
     return ((await res.json()) as { result: T }).result;
   },
-  // The phone page has no desktop event streams picked up yet (playback progress, ASR jobs): T2 only needs
-  // request/response reads, so events are silently ignored here.
+  // Phone SSE subscriptions are scoped to the episode and request in mobile/phoneEvents.ts.
   async listen<T>(_event: string, _handler: (payload: T) => void) { return () => {}; },
 };
 
@@ -67,6 +71,9 @@ export interface RemoteStatus {
   codeExpiresAt: number;
   /** How many phones are currently paired. */
   devices: number;
+  pairedDevices: { id: number; label: string; pairedAt: number; lastSeen: number | null }[];
+  viewers: number;
+  nowPlaying: { episodeId: string; seconds: number; updatedAt: number } | null;
 }
 
 /** Why pairing failed, as the phone page shows it. */
@@ -77,7 +84,7 @@ export class PairError extends Error { constructor(public reason: PairFailure) {
 export async function pairDevice(code: string): Promise<void> {
   let res: Response;
   try {
-    res = await fetch("/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, name: deviceName() }) });
+    res = await fetch("/pair", { method: "POST", referrerPolicy: "same-origin", headers: { "Content-Type": "application/json", "X-Subcast-Client": "phone" }, body: JSON.stringify({ code, name: deviceName() }) });
   } catch { throw new PairError("network"); }
   if (res.ok) {
     const body = (await res.json()) as { token?: string };
@@ -91,8 +98,14 @@ export async function pairDevice(code: string): Promise<void> {
   throw new PairError("unknown");
 }
 
-/** A readable name for the paired-device list (only shown on the desktop in later versions). */
-const deviceName = () => (typeof navigator === "undefined" ? "phone" : navigator.userAgent.slice(0, 60));
+/** Friendly device label shown on the desktop after pairing. */
+const deviceName = () => {
+  const ua = navigator.userAgent;
+  if (/iPad|Macintosh/.test(ua) && navigator.maxTouchPoints > 1) return "iPad";
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/Android/.test(ua)) return "Android";
+  return ua.slice(0, 60);
+};
 
 /** A match inside one show: which part of the episode matched, a few words around it, and for subtitles the time. */
 /** One day-hour of listening to one episode (from the player; seeks don't count). */
@@ -206,12 +219,17 @@ export const api = {
   refreshShow: (id: string) => invoke<Show>("refresh_show", { id }),
   setMenuLabels: (labels: string[]) => invoke<void>("set_menu_labels", { labels }),
   refreshAll: () => invoke<{ shows: number; newEpisodes: number; skipped: boolean }>("refresh_all"),
+  checkPhoneSession: () => invoke<void>("phone_presence"),
+  askPhoneEpisode: (episodeId: string, question: string) => invoke<string>("ask_episode", { episodeId, question }),
   listShows: () => invoke<Show[]>("list_shows"),
   listEpisodes: (showId?: string, limit?: number) => invoke<Episode[]>("list_episodes", { showId, limit }),
   recentEpisodes: () => invoke<Episode[]>("recent_episodes"),
   getEpisode: (id: string) => invoke<Episode | null>("get_episode", { id }),
   removeShow: (id: string, keepEpisodeId?: string) => invoke<void>("remove_show", { id, keepEpisodeId }),
   setProgress: (id: string, seconds: number) => invoke<void>("set_progress", { id, seconds }),
+  savePhoneProgress: (id: string, seconds: number, playing: boolean, ageMs: number) =>
+    invoke<boolean>("set_progress", { id, seconds, playing, ageMs }),
+  finishPhoneEpisode: (id: string, ageMs: number) => invoke<boolean>("set_watched", { id, watched: "done", ageMs }),
   setWatched: (id: string, watched: "done" | "unseen" | null) => invoke<void>("set_watched", { id, watched }),
   markShowWatched: (showId: string) => invoke<number>("mark_show_watched", { showId }),
   searchShow: (showId: string, query: string) => invoke<ShowHit[]>("search_show", { showId, query }),
@@ -302,6 +320,7 @@ export const api = {
   videoClipRender: (jobId: string, req: RenderVideoClipRequest) => invoke<RenderVideoClipResult>("video_clip_render", { jobId, req }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
   /** 手机访问：开关状态（含可打开地址与配对码）。 */
+  revokePhone: (deviceId: number | null) => invoke<RemoteStatus>("remote_revoke", { deviceId }),
   remoteStatus: () => invoke<RemoteStatus>("remote_status"),
   /** 打开手机访问（额外的局域网监听 + 新配对码）。 */
   enableRemote: () => invoke<RemoteStatus>("remote_enable"),

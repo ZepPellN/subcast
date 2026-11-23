@@ -28,6 +28,16 @@ async function boot() {
     const { default: App } = await import("./App");
     root.render(<React.StrictMode><App /></React.StrictMode>);
   } else {
+    for (const [rel, href] of [["manifest", "/phone.webmanifest"], ["apple-touch-icon", "/phone-icon-192.png"]]) {
+      const link = document.createElement("link");
+      link.rel = rel;
+      link.href = href;
+      document.head.append(link);
+    }
+    const theme = document.createElement("meta");
+    theme.name = "theme-color";
+    theme.content = matchMedia("(prefers-color-scheme: dark)").matches ? "#161616" : "#f8f7f4";
+    document.head.append(theme);
     const { PhoneApp } = await import("./mobile/PhoneApp");
     setLang("auto");
     root.render(<React.StrictMode><PhoneApp /></React.StrictMode>);

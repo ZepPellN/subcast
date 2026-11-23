@@ -22,8 +22,8 @@ import { DeepRead } from "./DeepRead";
 import { SkeletonEpisode } from "./Skeleton";
 import { PANEL, useLayout } from "../lib/layout";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, errorText, type Episode } from "../lib/api";
-import { date, duration, notesText } from "../lib/format";
+import { api, errorText, transport, type Episode } from "../lib/api";
+import { clock, date, duration, notesText } from "../lib/format";
 import { sameFeed, showName } from "../lib/picks";
 import { isZh, useZh, useZhParagraphs } from "../lib/zh";
 import { autoTranslate, loadTranscript, useJobs } from "../lib/jobs";
@@ -293,7 +293,13 @@ export function EpisodeView({ id }: { id: string }) {
       void loadTranscript(e);
       // Opening an episode loads it into the player, unless something else is playing.
       const s = useStore.getState();
-      if (s.current?.id !== e.id && !s.playing) load(offline ? { ...e, videoId: undefined } : e);
+      if (s.playing || s.loadingSince) return;
+      if (s.current?.id !== e.id) load(offline ? { ...e, videoId: undefined } : e);
+      else if (s.current.progress !== e.progress) {
+        // The same episode can still be loaded on the computer after the phone has saved a newer position.
+        s.set({ current: { ...s.current, progress: e.progress, watchedOverride: e.watchedOverride } });
+        if (Math.abs(s.time - e.progress) >= 1) seekSoon(e.progress, false);
+      }
     });
     return () => {
       live = false;
@@ -398,6 +404,30 @@ function DownloadButton({ ep }: { ep: Episode }) {
   return <button className="round-btn" title={ep.audioUrl ? t("下载，离线也能听") : t("下载视频，打开就播，离线也能看")} onClick={() => void downloadEpisode(ep)}><ArrowDownToLine size={15} /></button>;
 }
 
+function PhonePlayback({ id }: { id: string }) {
+  const [seconds, setSeconds] = useState<number | null>(null);
+  useEffect(() => {
+    let live = true;
+    let interval: number | undefined;
+    let cleanup: (() => void) | undefined;
+    const refresh = async () => {
+      try {
+        const status = await api.remoteStatus();
+        if (!live) return;
+        setSeconds(status.nowPlaying?.episodeId === id ? status.nowPlaying.seconds : null);
+        if (status.enabled) interval ??= window.setInterval(refresh, 4000);
+        else { window.clearInterval(interval); interval = undefined; }
+      } catch { /* phone status is optional */ }
+    };
+    void transport.listen<boolean>("remote-enabled", () => { void refresh(); }).then((stop) => {
+      if (live) cleanup = stop; else stop();
+    }).catch(() => {});
+    void refresh();
+    return () => { live = false; window.clearInterval(interval); cleanup?.(); };
+  }, [id]);
+  return seconds === null ? null : <p className="muted small">{t("手机正在播放 · {time}", { time: clock(seconds) })}</p>;
+}
+
 function EpisodeBody({ ep, tab, setTab, startAudio }: { ep: Episode; tab: Tab; setTab: (t: Tab) => void; startAudio: boolean }) {
   // Feeds sometimes mark a deep-read that isn't there: then the tab goes away.
   const [noDeep, setNoDeep] = useState<string | null>(null);
@@ -476,6 +506,7 @@ function EpisodeBody({ ep, tab, setTab, startAudio }: { ep: Episode; tab: Tab; s
             <div className="ep-title">
               <p className="meta-line">{[ep.showTitle && ep.showId !== "single" ? (hasShow ? <button key="s" className="show-link" title={t("查看这档节目的全部单集")} onClick={() => go({ kind: "show", id: ep.showId })}>{showDisplay}</button> : <span key="s">{showDisplay}</span>) : null, date(ep.published), duration(ep.duration)].filter(Boolean).map((x, i) => <span key={i}>{i > 0 && " · "}{x}</span>)}</p>
               <h1>{titleZh ?? ep.title}</h1>
+              <PhonePlayback key={ep.id} id={ep.id} />
               {titleZh && titleZh !== ep.title && <p className="orig-line clamp1">{ep.title}</p>}
             </div>
             {!panelOpen && <button className="round-btn" title={t("显示字幕栏（⌘\\）")} onClick={() => put({ panelOpen: true })}><PanelRightOpen size={15} /></button>}

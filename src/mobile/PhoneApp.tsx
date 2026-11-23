@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { api, deviceToken, setDeviceToken, pairDevice, PairError, Unauthorized, type Episode, type PairFailure, type Show } from "../lib/api";
 import { t } from "../lib/i18n";
+import { isWatched } from "../lib/watchInfo";
 import { clock, date } from "../lib/format";
+import { resetPhoneProgress, syncPhoneProgress } from "./phoneProgress";
 import { EpisodePage } from "./EpisodePage";
 import "./phone.css";
 
@@ -20,12 +22,15 @@ const failureText = (reason: PairFailure): string => {
   }
 };
 
-function PairPage({ onPaired }: { onPaired: () => void }) {
+function PairPage({ onPaired, revoked }: { onPaired: () => void; revoked: boolean }) {
   const [code, setCode] = useState(() => (new URLSearchParams(location.search).get("code") ?? "").replace(/\D/g, "").slice(0, 6));
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<PairFailure | null>(null);
   const input = useRef<HTMLInputElement>(null);
-  useEffect(() => { input.current?.focus(); }, []);
+  useEffect(() => {
+    input.current?.focus();
+    try { if (new URLSearchParams(location.search).has("code")) history.replaceState(null, "", location.pathname); } catch { /* private mode */ }
+  }, []);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -47,6 +52,7 @@ function PairPage({ onPaired }: { onPaired: () => void }) {
       <div className="ph-pair">
         <p className="ph-brand">SubCast</p>
         <h1 className="ph-title">{t("输入配对码")}</h1>
+        {revoked && <p className="ph-error" role="alert">{t("手机访问已失效，请重新配对。")}</p>}
         <p className="ph-muted">{t("在电脑的 SubCast 里打开「设置 → 通用 → 手机访问」，把那里显示的 6 位配对码填在这里。")}</p>
         <form onSubmit={submit} className="ph-form">
           <input
@@ -91,7 +97,7 @@ function ShowRow({ show, onOpen }: { show: Show; onOpen: () => void }) {
   );
 }
 
-function ShowsPage({ onUnpair, onOpenShow }: { onUnpair: () => void; onOpenShow: (show: Show) => void }) {
+function ShowsPage({ onUnpair, onUnauthorized, onOpenShow }: { onUnpair: () => void; onUnauthorized: () => void; onOpenShow: (show: Show) => void }) {
   const [shows, setShows] = useState<Show[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -102,7 +108,7 @@ function ShowsPage({ onUnpair, onOpenShow }: { onUnpair: () => void; onOpenShow:
     try {
       setShows(await api.listShows());
     } catch (e) {
-      if (e instanceof Unauthorized) { setDeviceToken(null); onUnpair(); return; }
+      if (e instanceof Unauthorized) { onUnauthorized(); return; }
       setError(t("加载失败，请稍后再试"));
     } finally {
       setBusy(false);
@@ -122,7 +128,7 @@ function ShowsPage({ onUnpair, onOpenShow }: { onUnpair: () => void; onOpenShow:
           <button className="ph-btn ghost" onClick={() => { setDeviceToken(null); onUnpair(); }}>{t("解除配对")}</button>
         </div>
       </header>
-      <p className="ph-note">{t("只读：手机上可以听单集，不会改动电脑上的订阅和设置。")}</p>
+      <p className="ph-note">{t("可以收听、同步进度和提问。手机和电脑需在同一网络，或都已连接 Tailscale。")}</p>
       {error && <p className="ph-error">{error}</p>}
       {shows == null && !error && <p className="ph-muted ph-loading">{t("加载中…")}</p>}
       {shows != null && shows.length === 0 && <p className="ph-muted ph-loading">{t("电脑上还没有订阅。")}</p>}
@@ -136,14 +142,17 @@ function ShowsPage({ onUnpair, onOpenShow }: { onUnpair: () => void; onOpenShow:
 }
 
 function EpisodeRow({ episode, onOpen }: { episode: Episode; onOpen: () => void }) {
+  const [broken, setBroken] = useState(false);
   const meta = [date(episode.published), episode.duration ? clock(episode.duration) : ""].filter(Boolean).join(" · ");
   return (
     <li className="ph-ep-row-wrap">
       <button className="ph-ep-row" onClick={onOpen}>
+        {episode.cover && !broken && <img className="ph-cover" alt="" src={episode.cover} loading="lazy" onError={() => setBroken(true)} />}
         <span className="ph-ep-row-text">
           <span className="ph-ep-row-title">{episode.title}</span>
           <span className="ph-muted ph-ep-row-meta">
             {meta}
+            {isWatched(episode) && <span className="ph-badge">{t("已看")}</span>}
             <span className={`ph-badge${episode.hasTranscript ? "" : " muted"}`}>
               {episode.hasTranscript ? t("有字幕") : t("未转写")}
             </span>
@@ -216,8 +225,9 @@ type View =
   | { kind: "episode"; show: Show; episodeId: string };
 
 export function PhoneApp() {
+  const [revoked, setRevoked] = useState(false);
   const [paired, setPaired] = useState(() => !!deviceToken());
-  const [view, setView] = useState<View>({ kind: "shows" });
+  const [view, setView] = useState<View>(() => deviceToken() ? history.state?.view ?? { kind: "shows" } : { kind: "shows" });
 
   // 手机上的返回手势/浏览器返回键：每一层都记一条历史，回来时恢复那一层。
   useEffect(() => {
@@ -229,13 +239,6 @@ export function PhoneApp() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // 刷新页面后，当前这条历史记录还带着上一次的页面状态；页面本身总是从订阅列表开始，
-  // 所以把这条记录改回「订阅列表」，免得返回键把我们带回刷掉的那一层。
-  useEffect(() => {
-    if (!paired) return;
-    try { history.replaceState({ view: { kind: "shows" } }, ""); } catch { /* private mode */ }
-  }, [paired]);
-
   const go = (next: View) => {
     setView(next);
     try { history.pushState({ view: next }, ""); } catch { /* private mode */ }
@@ -244,25 +247,63 @@ export function PhoneApp() {
 
   const pairedNow = () => {
     // 配对码别留在浏览历史里。
-    try { history.replaceState(null, "", location.pathname); } catch { /* fine */ }
+    try { history.replaceState({ view: { kind: "shows" } }, "", location.pathname); } catch { /* fine */ }
     setView({ kind: "shows" });
+    setRevoked(false);
     setPaired(true);
   };
-  const unpair = () => { setDeviceToken(null); setView({ kind: "shows" }); setPaired(false); };
+  const unpair = useCallback(() => {
+    setDeviceToken(null);
+    resetPhoneProgress();
+    setView({ kind: "shows" });
+    setPaired(false);
+  }, []);
 
-  if (!paired) return <PairPage onPaired={pairedNow} />;
+  const onUnauthorized = useCallback(() => {
+    setRevoked(true);
+    unpair();
+  }, [unpair]);
+
+  useEffect(() => {
+    if (!paired) return;
+    let live = true;
+    const ping = () => {
+      if (document.visibilityState === "hidden") return;
+      const token = deviceToken();
+      void api.checkPhoneSession().catch((error) => {
+        if (live && error instanceof Unauthorized && token === deviceToken()) onUnauthorized();
+      });
+    };
+    const timer = window.setInterval(ping, 20_000);
+    document.addEventListener("visibilitychange", ping);
+    window.addEventListener("online", ping);
+    ping();
+    window.addEventListener("online", syncPhoneProgress);
+    window.addEventListener("subcast:unauthorized", onUnauthorized);
+    void syncPhoneProgress();
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", ping);
+      window.removeEventListener("online", ping);
+      window.removeEventListener("online", syncPhoneProgress);
+      window.removeEventListener("subcast:unauthorized", onUnauthorized);
+    };
+  }, [paired, onUnauthorized]);
+
+  if (!paired) return <PairPage onPaired={pairedNow} revoked={revoked} />;
   if (view.kind === "episodes") {
     return (
       <EpisodesPage
         show={view.show}
         onBack={back}
         onOpenEpisode={(episodeId) => go({ kind: "episode", show: view.show, episodeId })}
-        onUnauthorized={unpair}
+        onUnauthorized={onUnauthorized}
       />
     );
   }
   if (view.kind === "episode") {
-    return <EpisodePage episodeId={view.episodeId} onBack={back} onUnauthorized={unpair} />;
+    return <EpisodePage key={view.episodeId} episodeId={view.episodeId} onBack={back} onUnauthorized={onUnauthorized} />;
   }
-  return <ShowsPage onUnpair={unpair} onOpenShow={(show) => go({ kind: "episodes", show })} />;
+  return <ShowsPage onUnpair={unpair} onUnauthorized={onUnauthorized} onOpenShow={(show) => go({ kind: "episodes", show })} />;
 }

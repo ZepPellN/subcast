@@ -113,6 +113,7 @@
     "allow-remote-enable",
     "allow-remote-disable",
     "allow-remote-regenerate",
+    "allow-remote-revoke",
     "updater:default",
     "process:allow-restart",
     "core:window:allow-start-dragging",

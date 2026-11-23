@@ -3,10 +3,10 @@ import { AlignJustify, ChevronLeft, Pause, Play } from "lucide-react";
 import { api, Unauthorized, type Episode, type ReadingHints, type Segment, type Transcript } from "../lib/api";
 import { t } from "../lib/i18n";
 import { clock } from "../lib/format";
+import { pendingProgress, PROGRESS_INTERVAL, savePhoneProgress } from "./phoneProgress";
+import { PhoneChat } from "./PhoneChat";
+import { watchPhoneEvents } from "./phoneEvents";
 import { SPACINGS, SIZES, loadPrefs, savePrefs } from "./phonePrefs";
-
-/** The phone's single-episode page (issue #3): play the episode's own audio address, and a bilingual subtitle
- *  panel that follows playback. Nothing here writes to the desktop: progress and settings stay untouched. */
 
 /** The last line starting at or before `time`; -1 before the first. (Same 0.15 s grace as the desktop panel.) */
 function activeIndex(segments: Segment[], time: number): number {
@@ -47,7 +47,9 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
   const [hints, setHints] = useState<ReadingHints | null>(null);
   const [transcript, setTranscript] = useState<Transcript | null>(null);
   const [transcriptState, setTranscriptState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [asrProgress, setAsrProgress] = useState<number | null>(null);
   const [loadError, setLoadError] = useState("");
+  const [reload, setReload] = useState(0);
   const [audioError, setAudioError] = useState("");
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -55,6 +57,7 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
   const [active, setActive] = useState(-1);
   const [follow, setFollow] = useState(true);
   const [prefs, setPrefs] = useState(loadPrefs);
+  const [tab, setTab] = useState<"subtitles" | "chat">("subtitles");
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -62,6 +65,35 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
   const followRef = useRef(true);
   const programmaticUntil = useRef(0);
   const resumedRef = useRef(false);
+  const reconnectAt = useRef<number | null>(null);
+  const lastSave = useRef(0);
+  const interacted = useRef(false);
+  const position = useRef(0);
+
+  const save = useCallback((playing: boolean, finished = false) => {
+    if (!interacted.current) return;
+    lastSave.current = Date.now();
+    savePhoneProgress(episodeId, position.current, playing, finished);
+  }, [episodeId]);
+
+  useEffect(() => {
+    const hidden = () => {
+      if (document.visibilityState === "hidden") save(audioRef.current?.paused === false);
+    };
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      document.removeEventListener("visibilitychange", hidden);
+      save(false);
+    };
+  }, [save]);
+
+  useEffect(() => {
+    if (!loadError) return;
+    const retry = () => setReload((n) => n + 1);
+    window.addEventListener("online", retry);
+    const timer = window.setTimeout(retry, 5000);
+    return () => { window.removeEventListener("online", retry); window.clearTimeout(timer); };
+  }, [loadError, reload]);
 
   const segments = transcript?.segments ?? [];
 
@@ -82,9 +114,11 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
     resumedRef.current = false;
     (async () => {
       try {
+        const localPosition = pendingProgress(episodeId);
         const [ep, readingHints] = await Promise.all([api.getEpisode(episodeId), api.readingHints(episodeId)]);
         if (!live) return;
-        setEpisode(ep);
+        const pending = pendingProgress(episodeId) ?? localPosition;
+        setEpisode(ep && pending !== undefined ? { ...ep, progress: pending } : ep);
         setHints(readingHints);
         if (!ep?.hasTranscript) return;
         setTranscriptState("loading");
@@ -105,7 +139,22 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
       }
     })();
     return () => { live = false; };
-  }, [episodeId, onUnauthorized]);
+  }, [episodeId, onUnauthorized, reload]);
+
+  useEffect(() => {
+    if (!episode || episode.hasTranscript || transcript) return;
+    const controller = new AbortController();
+    void watchPhoneEvents(episode.id, controller.signal, undefined, undefined, (update) => {
+      if (update.stage === "done") {
+        setAsrProgress(null);
+        void api.loadTranscript(episode.id).then((loaded) => {
+          if (loaded && !controller.signal.aborted) { setTranscript(loaded); setTranscriptState("ready"); }
+        }).catch(() => {});
+      } else if (update.stage === "error") setAsrProgress(null);
+      else setAsrProgress(Math.round(update.progress * 100));
+    }).catch((e) => { if (e instanceof Unauthorized && !controller.signal.aborted) onUnauthorized(); });
+    return () => controller.abort();
+  }, [episode, transcript, onUnauthorized]);
 
   const blocked: Blocked = useMemo(() => {
     if (!episode) return null;
@@ -117,6 +166,19 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
   }, [episode, hints]);
 
   const canPlay = !!episode?.audioUrl && !blocked;
+
+  useEffect(() => {
+    if (!canPlay || !audioError) return;
+    const reconnect = () => {
+      const audio = audioRef.current;
+      if (!audio?.error) return;
+      reconnectAt.current = position.current;
+      resumedRef.current = false;
+      audio.load();
+    };
+    window.addEventListener("online", reconnect);
+    return () => window.removeEventListener("online", reconnect);
+  }, [canPlay, audioError]);
 
   // Lock-screen / control-center metadata (the audio element itself keeps playing in the background).
   useEffect(() => {
@@ -145,14 +207,16 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
 
   // Follow playback: scroll only when the active line changes, so it doesn't fight the reader.
   useEffect(() => {
-    if (active < 0 || !followRef.current) return;
+    if (active < 0 || tab !== "subtitles" || !followRef.current) return;
     scrollToRow(active);
-  }, [active, scrollToRow]);
+  }, [active, scrollToRow, tab]);
 
   const onTimeUpdate = () => {
     const a = audioRef.current;
     if (!a) return;
+    position.current = a.currentTime;
     setTime(a.currentTime);
+    if (!a.paused && Date.now() - lastSave.current >= PROGRESS_INTERVAL) save(true);
     const next = activeIndex(segments, a.currentTime);
     setActive((prev) => (prev === next ? prev : next));
   };
@@ -161,12 +225,15 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
     const a = audioRef.current;
     if (!a) return;
     setDuration(Number.isFinite(a.duration) ? a.duration : 0);
-    // 从电脑上听到一半的那期，手机上接着听（只是不写回进度）。
-    if (!resumedRef.current) {
+    if (!resumedRef.current && a.readyState >= 1) {
       resumedRef.current = true;
-      const resumeAt = episode?.progress ?? 0;
-      if (resumeAt > 5 && (!Number.isFinite(a.duration) || resumeAt < a.duration - 5)) {
+      const recovered = reconnectAt.current;
+      const resumeAt = recovered ?? pendingProgress(episodeId) ?? episode?.progress ?? 0;
+      reconnectAt.current = null;
+      setAudioError("");
+      if (resumeAt > (recovered === null ? 5 : 0) && (!Number.isFinite(a.duration) || resumeAt < a.duration - 5)) {
         a.currentTime = resumeAt;
+        position.current = resumeAt;
         setTime(resumeAt);
       }
     }
@@ -183,6 +250,8 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
     const a = audioRef.current;
     if (!a || !canPlay) return;
     a.currentTime = seconds;
+    position.current = seconds;
+    interacted.current = true;
     setTime(seconds);
   };
 
@@ -190,8 +259,8 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
     const seg = segments[index];
     if (!seg || !canPlay) return;
     const a = audioRef.current;
-    if (a && (Number.isFinite(a.duration) ? seg.start < a.duration : true)) a.currentTime = seg.start;
-    setTime(seg.start);
+    if (!a || (Number.isFinite(a.duration) && seg.start >= a.duration)) return;
+    seek(seg.start);
     setActive(index);
     setFollowing(true);
     scrollToRow(index);
@@ -245,9 +314,22 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
                 onTimeUpdate={onTimeUpdate}
                 onLoadedMetadata={onLoadedMetadata}
                 onDurationChange={onLoadedMetadata}
-                onPlay={() => setPlaying(true)}
-                onPause={() => setPlaying(false)}
-                onEnded={() => setPlaying(false)}
+                onPlay={(e) => {
+                  setPlaying(true);
+                  interacted.current = true;
+                  position.current = e.currentTarget.currentTime;
+                  if (lastSave.current === 0) save(true);
+                }}
+                onPause={(e) => {
+                  setPlaying(false);
+                  position.current = e.currentTarget.currentTime;
+                  if (!e.currentTarget.ended) save(false);
+                }}
+                onEnded={(e) => {
+                  setPlaying(false);
+                  position.current = e.currentTarget.currentTime;
+                  save(false, true);
+                }}
                 onError={() => setAudioError(t("音频加载失败，请检查网络后刷新。"))}
               />
               <div className="ph-player-row">
@@ -287,7 +369,11 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
             </div>
           ) : null}
 
-          <section className="ph-subs">
+          <nav className="ph-tabs" aria-label={t("单集内容")}>
+            <button className="ph-btn ghost" aria-pressed={tab === "subtitles"} onClick={() => setTab("subtitles")}>{t("字幕")}</button>
+            <button className="ph-btn ghost" aria-pressed={tab === "chat"} onClick={() => setTab("chat")}>{t("问这一期")}</button>
+          </nav>
+          <section className="ph-subs" hidden={tab !== "subtitles"}>
             <div className="ph-sub-head">
               <p className="ph-sub-title">{showZh ? t("双语字幕") : t("字幕")}</p>
               <div className="ph-sub-tools">
@@ -301,7 +387,9 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
 
             {transcriptState === "error" && <p className="ph-error ph-sub-empty">{t("字幕加载失败，请刷新重试。")}</p>}
 
-            {transcriptState !== "loading" && !segments.length && (
+            {asrProgress !== null && !segments.length && <p className="ph-muted ph-sub-empty">{t("电脑正在转写 · {n}%", { n: asrProgress })}</p>}
+
+            {asrProgress === null && transcriptState !== "loading" && !segments.length && (
               <div className="ph-sub-empty">
                 <p className="ph-degrade-title">{t("请先在电脑上转写")}</p>
                 <p className="ph-muted ph-degrade-hint">{t("这台电脑上还没有这一集的字幕。在电脑上打开它并生成或导入字幕，手机就能跟着听了。")}</p>
@@ -346,6 +434,9 @@ export function EpisodePage({ episodeId, onUnauthorized, onBack }: Props) {
               </button>
             )}
           </section>
+          <div className="ph-chat-scroll" hidden={tab !== "chat"}>
+            <PhoneChat episodeId={episode.id} ready={segments.length > 0} onUnauthorized={onUnauthorized} />
+          </div>
         </>
       )}
     </div>

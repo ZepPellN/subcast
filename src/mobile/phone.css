@@ -129,3 +129,25 @@
 .ph-progress { display: block; height: 3px; margin-top: 2px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .ph-progress > span { display: block; height: 100%; background: var(--text-2); }
 .ph-badge.muted { background: var(--soft); color: var(--muted); }
+
+.ph-chat { display: grid; gap: 10px; min-width: 0; }
+.ph-ep [hidden] { display: none; }
+.ph-tabs { flex: none; display: flex; gap: 8px; padding: 0 14px 10px; }
+.ph-tabs .ph-btn[aria-pressed="true"] { background: var(--soft); color: var(--text); }
+.ph-chat-scroll { flex: 1; min-height: 0; overflow: auto; padding: 4px 14px max(24px, env(safe-area-inset-bottom)); }
+.ph-chat p { margin: 0; }
+.ph-chat form { display: grid; gap: 8px; justify-items: start; }
+.ph-chat form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+}
+.ph-answer { display: grid; gap: 10px; justify-items: start; }
+.ph-answer p { overflow-wrap: anywhere; white-space: pre-wrap; }
+.ph-copy-buffer { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
