@@ -1,4 +1,5 @@
 import { api, deviceToken, Unauthorized } from "../lib/api";
+import { getAccessLoginRequired } from "../lib/phoneFetch";
 
 export const PROGRESS_INTERVAL = 15_000;
 const KEY = "subcast.phone.pending-progress";
@@ -32,7 +33,7 @@ export function savePhoneProgress(id: string, seconds: number, playing: boolean,
 }
 
 export async function syncPhoneProgress() {
-  if (sending || !deviceToken() || !navigator.onLine) return;
+  if (sending || getAccessLoginRequired() || !deviceToken() || !navigator.onLine) return;
   sending = true;
   window.clearTimeout(retry);
   const token = deviceToken();
@@ -44,10 +45,10 @@ export async function syncPhoneProgress() {
       if (applied && position.finished && deviceToken() === token) await api.finishPhoneEpisode(id, age());
       if (pending[id] === position) { delete pending[id]; persist(); }
     }
-    if (Object.keys(pending).length) retry = window.setTimeout(syncPhoneProgress, 0);
+    if (!getAccessLoginRequired() && Object.keys(pending).length) retry = window.setTimeout(syncPhoneProgress, 0);
   } catch (e) {
     if (e instanceof Unauthorized) window.dispatchEvent(new Event("subcast:unauthorized"));
-    else retry = window.setTimeout(syncPhoneProgress, 5000);
+    else if (!getAccessLoginRequired()) retry = window.setTimeout(syncPhoneProgress, 5000);
   } finally {
     sending = false;
   }

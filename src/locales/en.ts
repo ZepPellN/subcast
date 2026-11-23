@@ -1837,6 +1837,12 @@ const dict: Record<string, string> = {
   "正在回答…": "Answering…",
   "提问": "Ask",
   "复制回答": "Copy answer",
+  "需要登录 Cloudflare Access": "Cloudflare Access sign-in required",
+  "刷新页面以继续。已有设备配对和待同步进度会保留。": "Reload to continue. Your device pairing and unsynced progress will be kept.",
+  "刷新并登录": "Reload and sign in",
+  "连不上电脑，请确认电脑上的 HTTPS 手机访问和 Tunnel 均已开启。": "Can't reach the computer. Check that HTTPS phone access and the tunnel are running.",
+  "这期只有 HTTP 音频链接": "This episode only has an HTTP audio link",
+  "HTTPS 手机访问只能播放 HTTPS 音频直链。你仍可查看字幕和使用问答。": "HTTPS phone access can only play direct HTTPS audio links. Subtitles and episode questions are still available.",
 };
 
 export default dict;

@@ -1,6 +1,7 @@
 import { invoke as desktopInvoke } from "@tauri-apps/api/core";
 import { listen as desktopListen, type UnlistenFn } from "@tauri-apps/api/event";
 import { tr } from "./i18n";
+import { AccessRequired, phoneFetch } from "./phoneFetch";
 import type { Aligned, TimeMap } from "./timemap";
 
 // ---- transport ----------------------------------------------------------------------------------------
@@ -37,7 +38,7 @@ const desktopTransport: Transport = {
 const phoneTransport: Transport = {
   async call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
     const token = deviceToken();
-    const res = await fetch(`/rpc/${encodeURIComponent(command)}`, {
+    const res = await phoneFetch(`/rpc/${encodeURIComponent(command)}`, {
       method: "POST",
       referrerPolicy: "same-origin",
       keepalive: command === "set_progress" || command === "set_watched",
@@ -84,8 +85,11 @@ export class PairError extends Error { constructor(public reason: PairFailure) {
 export async function pairDevice(code: string): Promise<void> {
   let res: Response;
   try {
-    res = await fetch("/pair", { method: "POST", referrerPolicy: "same-origin", headers: { "Content-Type": "application/json", "X-Subcast-Client": "phone" }, body: JSON.stringify({ code, name: deviceName() }) });
-  } catch { throw new PairError("network"); }
+    res = await phoneFetch("/pair", { method: "POST", referrerPolicy: "same-origin", headers: { "Content-Type": "application/json", "X-Subcast-Client": "phone" }, body: JSON.stringify({ code, name: deviceName() }) });
+  } catch (e) {
+    if (e instanceof AccessRequired) throw e;
+    throw new PairError("network");
+  }
   if (res.ok) {
     const body = (await res.json()) as { token?: string };
     if (body.token) { setDeviceToken(body.token); return; }

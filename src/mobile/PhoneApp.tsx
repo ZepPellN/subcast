@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { api, deviceToken, setDeviceToken, pairDevice, PairError, Unauthorized, type Episode, type PairFailure, type Show } from "../lib/api";
+import { AccessRequired, getAccessLoginRequired, subscribeToAccessLogin } from "../lib/phoneFetch";
 import { t } from "../lib/i18n";
 import { isWatched } from "../lib/watchInfo";
 import { clock, date } from "../lib/format";
@@ -17,7 +18,9 @@ const failureText = (reason: PairFailure): string => {
     case "expired": return t("配对码已过期，请在电脑上重新生成");
     case "closed": return t("手机访问已关闭，请在电脑上打开「手机访问」开关");
     case "locked": return t("试错的次数太多，请等一分钟再试");
-    case "network": return t("连不上电脑，请确认手机和电脑在同一个网络，且电脑上的「手机访问」已打开");
+    case "network": return location.protocol === "https:"
+      ? t("连不上电脑，请确认电脑上的 HTTPS 手机访问和 Tunnel 均已开启。")
+      : t("连不上电脑，请确认手机和电脑在同一个网络，且电脑上的「手机访问」已打开");
     default: return t("配对失败，请再试一次");
   }
 };
@@ -41,7 +44,7 @@ function PairPage({ onPaired, revoked }: { onPaired: () => void; revoked: boolea
       await pairDevice(code);
       onPaired();
     } catch (err) {
-      setFailure(err instanceof PairError ? err.reason : "unknown");
+      if (!(err instanceof AccessRequired)) setFailure(err instanceof PairError ? err.reason : "unknown");
     } finally {
       setBusy(false);
     }
@@ -71,6 +74,21 @@ function PairPage({ onPaired, revoked }: { onPaired: () => void; revoked: boolea
         </form>
         {failure && <p className="ph-error" role="alert">{failureText(failure)}</p>}
         <p className="ph-hint">{t("配对码 5 分钟内有效，用过一次就失效。令牌保存在这台手机里，7 天内刷新不用再配对。")}</p>
+      </div>
+    </div>
+  );
+}
+
+function AccessLoginPage() {
+  return (
+    <div className="phone">
+      <div className="ph-pair">
+        <p className="ph-brand">SubCast</p>
+        <h1 className="ph-title">{t("需要登录 Cloudflare Access")}</h1>
+        <p className="ph-muted" role="alert">{t("刷新页面以继续。已有设备配对和待同步进度会保留。")}</p>
+        <div className="ph-form">
+          <button className="ph-btn primary" onClick={() => location.reload()}>{t("刷新并登录")}</button>
+        </div>
       </div>
     </div>
   );
@@ -225,6 +243,7 @@ type View =
   | { kind: "episode"; show: Show; episodeId: string };
 
 export function PhoneApp() {
+  const accessLoginRequired = useSyncExternalStore(subscribeToAccessLogin, getAccessLoginRequired);
   const [revoked, setRevoked] = useState(false);
   const [paired, setPaired] = useState(() => !!deviceToken());
   const [view, setView] = useState<View>(() => deviceToken() ? history.state?.view ?? { kind: "shows" } : { kind: "shows" });
@@ -265,7 +284,7 @@ export function PhoneApp() {
   }, [unpair]);
 
   useEffect(() => {
-    if (!paired) return;
+    if (!paired || accessLoginRequired) return;
     let live = true;
     const ping = () => {
       if (document.visibilityState === "hidden") return;
@@ -289,8 +308,9 @@ export function PhoneApp() {
       window.removeEventListener("online", syncPhoneProgress);
       window.removeEventListener("subcast:unauthorized", onUnauthorized);
     };
-  }, [paired, onUnauthorized]);
+  }, [paired, accessLoginRequired, onUnauthorized]);
 
+  if (accessLoginRequired) return <AccessLoginPage />;
   if (!paired) return <PairPage onPaired={pairedNow} revoked={revoked} />;
   if (view.kind === "episodes") {
     return (

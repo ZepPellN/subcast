@@ -1,4 +1,5 @@
 import { deviceToken, Unauthorized } from "../lib/api";
+import { AccessRequired, phoneFetch } from "../lib/phoneFetch";
 
 export interface AnswerEvent { requestId: string; sequence: number; text: string; done: boolean; error: boolean }
 interface AsrEvent { episodeId: string; stage: string; progress: number }
@@ -17,7 +18,7 @@ export async function watchPhoneEvents(
     try {
       const query = new URLSearchParams({ episodeId, after: String(after) });
       if (requestId) query.set("requestId", requestId);
-      const response = await fetch(`/events?${query}`, {
+      const response = await phoneFetch(`/events?${query}`, {
         headers: { "X-Subcast-Client": "phone", Authorization: `Bearer ${deviceToken()}` },
         referrerPolicy: "same-origin",
         signal,
@@ -63,7 +64,7 @@ export async function watchPhoneEvents(
       if (!requestId) attempts = 0;
     } catch (error) {
       if (signal.aborted) return;
-      if (error instanceof Unauthorized || (error instanceof Error && error.message === "answer_lost")) throw error;
+      if (error instanceof Unauthorized || error instanceof AccessRequired || (error instanceof Error && error.message === "answer_lost")) throw error;
     }
     attempts++;
     if (requestId && attempts > 4) throw new Error("connection_lost");
