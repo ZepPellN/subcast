@@ -1,7 +1,97 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke as desktopInvoke } from "@tauri-apps/api/core";
+import { listen as desktopListen, type UnlistenFn } from "@tauri-apps/api/event";
 import { tr } from "./i18n";
 import type { Aligned, TimeMap } from "./timemap";
+
+// ---- transport ----------------------------------------------------------------------------------------
+// Everything below talks to the backend through one of two transports: the desktop shell uses Tauri's
+// invoke/event, the phone page (served over HTTP by the desktop, see src-tauri/src/remote.rs) uses the
+// JSON gateway /rpc/<command> with a device token. Components never see the difference.
+
+/** Running inside the Tauri shell (the desktop window) rather than a phone browser. */
+export const IS_DESKTOP = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const IS_PHONE = !IS_DESKTOP;
+
+export interface Transport {
+  call<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+  listen<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn>;
+}
+
+/** The device token /pair issued, kept in the browser so a refresh doesn't pair again. */
+const TOKEN_KEY = "subcast.device.token";
+export const deviceToken = (): string => { try { return localStorage.getItem(TOKEN_KEY) ?? ""; } catch { return ""; } };
+export const setDeviceToken = (token: string | null) => {
+  try { if (token) localStorage.setItem(TOKEN_KEY, token); else localStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ }
+};
+
+/** 401: no token / expired / revoked — the gateway never says which. */
+export class Unauthorized extends Error { constructor() { super("unauthorized"); } }
+/** 403: the command is not in this version's whitelist. */
+export class Forbidden extends Error { constructor() { super("forbidden"); } }
+
+const desktopTransport: Transport = {
+  call: <T>(command: string, args?: Record<string, unknown>) => desktopInvoke<T>(command, args),
+  listen: <T>(event: string, handler: (payload: T) => void) => desktopListen<T>(event, (e) => handler(e.payload)),
+};
+
+const phoneTransport: Transport = {
+  async call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+    const token = deviceToken();
+    const res = await fetch(`/rpc/${encodeURIComponent(command)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(args ?? {}),
+    });
+    if (res.status === 401) throw new Unauthorized();
+    if (res.status === 403) throw new Forbidden();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return ((await res.json()) as { result: T }).result;
+  },
+  // The T1 phone page only reads the subscription list; desktop event streams are not bridged yet.
+  async listen<T>(_event: string, _handler: (payload: T) => void) { return () => {}; },
+};
+
+export const transport: Transport = IS_DESKTOP ? desktopTransport : phoneTransport;
+/** Backend call via the active transport (desktop invoke, phone gateway). */
+const invoke = <T>(command: string, args?: Record<string, unknown>) => transport.call<T>(command, args);
+
+/** One address the phone can open. `kind` is translated in the UI. */
+export interface RemoteUrl { kind: "lan" | "tailscale" | "loopback"; url: string }
+export interface RemoteStatus {
+  enabled: boolean;
+  port: number;
+  urls: RemoteUrl[];
+  /** The 6-digit pairing code while it is valid; null once used or expired. */
+  code: string | null;
+  codeExpiresAt: number;
+  /** How many phones are currently paired. */
+  devices: number;
+}
+
+/** Why pairing failed, as the phone page shows it. */
+export type PairFailure = "invalid" | "expired" | "closed" | "locked" | "network" | "unknown";
+export class PairError extends Error { constructor(public reason: PairFailure) { super(reason); } }
+
+/** Phone page: exchange the 6-digit code for a device token (saved in localStorage). */
+export async function pairDevice(code: string): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch("/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code, name: deviceName() }) });
+  } catch { throw new PairError("network"); }
+  if (res.ok) {
+    const body = (await res.json()) as { token?: string };
+    if (body.token) { setDeviceToken(body.token); return; }
+    throw new PairError("unknown");
+  }
+  if (res.status === 401) throw new PairError("invalid");
+  if (res.status === 410) throw new PairError("expired");
+  if (res.status === 503) throw new PairError("closed");
+  if (res.status === 429) throw new PairError("locked");
+  throw new PairError("unknown");
+}
+
+/** A readable name for the paired-device list (only shown on the desktop in later versions). */
+const deviceName = () => (typeof navigator === "undefined" ? "phone" : navigator.userAgent.slice(0, 60));
 
 /** A match inside one show: which part of the episode matched, a few words around it, and for subtitles the time. */
 /** One day-hour of listening to one episode (from the player; seeks don't count). */
@@ -205,6 +295,14 @@ export const api = {
   videoClipPrepare: (jobId: string, videoId: string, start: number, end: number, ranges?: [number, number][]) => invoke<PreparedClip>("video_clip_prepare", { jobId, videoId, start, end, ranges: ranges ?? null }),
   videoClipRender: (jobId: string, req: RenderVideoClipRequest) => invoke<RenderVideoClipResult>("video_clip_render", { jobId, req }),
   revealFile: (path: string) => invoke<void>("reveal_file", { path }),
+  /** 手机访问：开关状态（含可打开地址与配对码）。 */
+  remoteStatus: () => invoke<RemoteStatus>("remote_status"),
+  /** 打开手机访问（额外的局域网监听 + 新配对码）。 */
+  enableRemote: () => invoke<RemoteStatus>("remote_enable"),
+  /** 关闭手机访问：停止监听并吊销全部令牌。 */
+  disableRemote: () => invoke<RemoteStatus>("remote_disable"),
+  /** 重新生成配对码。 */
+  regenerateRemoteCode: () => invoke<RemoteStatus>("remote_regenerate"),
 };
 
 let llmCounter = 0;
@@ -229,9 +327,9 @@ export async function llmChat(opts: {
   // "streaming" after the answer is done.
   let pending = 0;
   if (opts.onDelta) {
-    unlisten = await listen<{ requestId: string; delta: string }>("llm", (ev) => {
-      if (ev.payload.requestId !== requestId) return;
-      full += ev.payload.delta;
+    unlisten = await transport.listen<{ requestId: string; delta: string }>("llm", (payload) => {
+      if (payload.requestId !== requestId) return;
+      full += payload.delta;
       if (!pending) pending = window.setTimeout(() => { pending = 0; opts.onDelta!(full); }, 40);
     });
   }
