@@ -47,7 +47,8 @@ const phoneTransport: Transport = {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return ((await res.json()) as { result: T }).result;
   },
-  // The T1 phone page only reads the subscription list; desktop event streams are not bridged yet.
+  // The phone page has no desktop event streams picked up yet (playback progress, ASR jobs): T2 only needs
+  // request/response reads, so events are silently ignored here.
   async listen<T>(_event: string, _handler: (payload: T) => void) { return () => {}; },
 };
 
@@ -137,6 +138,9 @@ export interface Episode {
 
 export interface Segment { start: number; end: number; text: string }
 export interface Transcript { episodeId: string; source: string; language: string; segments: Segment[] }
+/** What the phone can't read itself: a downloaded copy lives on the computer only, and the Chinese translation
+ *  sits in a desktop blob. `zh` lines match `segments` index by index (null where a line has no translation). */
+export interface ReadingHints { offline: boolean; zh: (string | null)[] | null }
 export interface SearchResult { title: string; author: string; cover?: string; feedUrl: string; genre?: string; episodes?: number; /** "youtube" for a YouTube channel; absent for an Apple Podcasts show. */ source?: "youtube" }
 export interface ModelInfo { id: string; name: string; sizeMb: number; note: string; installed: boolean; /** Another app's copy, used in place (no download). */ from?: string | null }
 export interface Provider { id: string; name: string; protocol: "openai" | "anthropic" | "cli"; baseUrl: string; model: string; needsKey: boolean; keyUrl?: string; models?: string[]; group?: "relay" | "provider" | "local" | "cli" }
@@ -214,6 +218,8 @@ export const api = {
   searchPodcasts: (term: string, country?: string) => invoke<SearchResult[]>("search_podcasts", { term, country }),
   youtubeChannelFeed: (videoId: string) => invoke<string>("youtube_channel_feed", { videoId }),
   loadTranscript: (episodeId: string) => invoke<Transcript | null>("load_transcript", { episodeId }),
+  /** Phone page: whether a downloaded copy exists (not playable there) and the subtitles' Chinese translation. */
+  readingHints: (episodeId: string) => invoke<ReadingHints>("reading_hints", { episodeId }),
   fetchOfficialTranscript: (episodeId: string) => invoke<Transcript | null>("fetch_official_transcript", { episodeId }),
   transcribe: (episodeId: string, model: string, language: string, cloud?: CloudAsr) => invoke<Transcript>("transcribe", { episodeId, model, language, cloud: cloud ?? null }),
   cancelJob: (id: string) => invoke<void>("cancel_job", { id }),

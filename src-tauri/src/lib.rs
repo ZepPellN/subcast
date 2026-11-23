@@ -793,15 +793,37 @@ impl remote::Files for UiFiles {
 }
 
 /// The desktop commands the phone gateway may run. What is allowed lives in remote.rs (a hardcoded whitelist);
-/// T1 only needs 列订阅.
+/// T2 需要读单集、字幕和能不能播的提示，所以这里全是只读转发（参数来自手机页的 JSON）。
 struct AppCommands(AppHandle);
 
 impl remote::Commands for AppCommands {
-    fn call(&self, command: &str, _args: Value) -> Result<Value, String> {
+    fn call(&self, command: &str, args: Value) -> Result<Value, String> {
+        let state = self.0.state::<AppState>();
+        let bad_args = || "bad_args".to_string();
         match command {
-            "list_shows" => {
-                let shows = list_shows(self.0.state::<AppState>())?;
-                serde_json::to_value(&shows).map_err(|e| e.to_string())
+            "list_shows" => serde_json::to_value(&db::list_shows(&state.db.lock().unwrap()).map_err(e)?).map_err(|err| err.to_string()),
+            "list_episodes" => {
+                let show_id = args.get("showId").and_then(Value::as_str);
+                let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(300);
+                let eps = db::list_episodes(&state.db.lock().unwrap(), show_id, limit).map_err(e)?;
+                serde_json::to_value(&eps).map_err(|err| err.to_string())
+            }
+            "get_episode" => {
+                let id = args.get("id").and_then(Value::as_str).ok_or_else(bad_args)?;
+                let ep = db::get_episode(&state.db.lock().unwrap(), id).map_err(e)?;
+                serde_json::to_value(&ep).map_err(|err| err.to_string())
+            }
+            "load_transcript" => {
+                let id = args.get("episodeId").and_then(Value::as_str).ok_or_else(bad_args)?;
+                let transcript = db::get_transcript(&state.db.lock().unwrap(), id).map_err(e)?;
+                serde_json::to_value(&transcript).map_err(|err| err.to_string())
+            }
+            // 手机放不了电脑上「离线下载」的本地文件，也不能自己读 blob；这两件事一起告诉它。
+            "reading_hints" => {
+                let id = args.get("episodeId").and_then(Value::as_str).ok_or_else(bad_args)?;
+                let offline = offline::find(&state.data, id).is_some();
+                let zh = db::get_blob(&state.db.lock().unwrap(), id, "zh").map_err(e)?;
+                Ok(remote::reading_hints(offline, zh.as_deref()))
             }
             _ => Err("forbidden".into()),
         }

@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api, deviceToken, setDeviceToken, pairDevice, PairError, Unauthorized, type PairFailure, type Show } from "../lib/api";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { api, deviceToken, setDeviceToken, pairDevice, PairError, Unauthorized, type Episode, type PairFailure, type Show } from "../lib/api";
 import { t } from "../lib/i18n";
+import { clock, date } from "../lib/format";
+import { EpisodePage } from "./EpisodePage";
 import "./phone.css";
 
-/** Only this page exists on a phone in T1: pair, then read the subscription list. */
+/** The phone page (issue #2 / T1 pairing, issue #3 / T2 listening): pair once, then read the shows, open a show's
+ *  episodes and listen to one with subtitles. The desktop window renders `App` instead (see main.tsx). */
 
 const failureText = (reason: PairFailure): string => {
   switch (reason) {
@@ -66,25 +70,28 @@ function PairPage({ onPaired }: { onPaired: () => void }) {
   );
 }
 
-function ShowRow({ show }: { show: Show }) {
+function ShowRow({ show, onOpen }: { show: Show; onOpen: () => void }) {
   const [broken, setBroken] = useState(false);
   return (
     <li className="ph-show">
-      {show.cover && !broken
-        ? <img className="ph-cover" src={show.cover} alt="" loading="lazy" onError={() => setBroken(true)} />
-        : <span className="ph-cover ph-cover-empty">{(show.title || "?").slice(0, 1)}</span>}
-      <div className="ph-show-text">
-        <p className="ph-show-title">{show.title}</p>
-        <p className="ph-muted ph-show-meta">
-          {show.author ?? ""}
-          {show.unplayed > 0 && <span className="ph-badge">{t("{n} 集未听", { n: show.unplayed })}</span>}
-        </p>
-      </div>
+      <button className="ph-row" onClick={onOpen}>
+        {show.cover && !broken
+          ? <img className="ph-cover" src={show.cover} alt="" loading="lazy" onError={() => setBroken(true)} />
+          : <span className="ph-cover ph-cover-empty">{(show.title || "?").slice(0, 1)}</span>}
+        <span className="ph-show-text">
+          <span className="ph-show-title">{show.title}</span>
+          <span className="ph-muted ph-show-meta">
+            {show.author ?? ""}
+            {show.unplayed > 0 && <span className="ph-badge">{t("{n} 集未听", { n: show.unplayed })}</span>}
+          </span>
+        </span>
+        <ChevronRight className="ph-chevron" size={18} />
+      </button>
     </li>
   );
 }
 
-function ShowsPage({ onUnpair }: { onUnpair: () => void }) {
+function ShowsPage({ onUnpair, onOpenShow }: { onUnpair: () => void; onOpenShow: (show: Show) => void }) {
   const [shows, setShows] = useState<Show[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -115,23 +122,147 @@ function ShowsPage({ onUnpair }: { onUnpair: () => void }) {
           <button className="ph-btn ghost" onClick={() => { setDeviceToken(null); onUnpair(); }}>{t("解除配对")}</button>
         </div>
       </header>
-      <p className="ph-note">{t("只读：这个版本手机端只能看订阅列表。")}</p>
+      <p className="ph-note">{t("只读：手机上可以听单集，不会改动电脑上的订阅和设置。")}</p>
       {error && <p className="ph-error">{error}</p>}
       {shows == null && !error && <p className="ph-muted ph-loading">{t("加载中…")}</p>}
       {shows != null && shows.length === 0 && <p className="ph-muted ph-loading">{t("电脑上还没有订阅。")}</p>}
-      {shows != null && shows.length > 0 && <ul className="ph-shows">{shows.map((s) => <ShowRow key={s.id} show={s} />)}</ul>}
+      {shows != null && shows.length > 0 && (
+        <ul className="ph-shows">
+          {shows.map((s) => <ShowRow key={s.id} show={s} onOpen={() => onOpenShow(s)} />)}
+        </ul>
+      )}
     </div>
   );
 }
 
+function EpisodeRow({ episode, onOpen }: { episode: Episode; onOpen: () => void }) {
+  const meta = [date(episode.published), episode.duration ? clock(episode.duration) : ""].filter(Boolean).join(" · ");
+  return (
+    <li className="ph-ep-row-wrap">
+      <button className="ph-ep-row" onClick={onOpen}>
+        <span className="ph-ep-row-text">
+          <span className="ph-ep-row-title">{episode.title}</span>
+          <span className="ph-muted ph-ep-row-meta">
+            {meta}
+            <span className={`ph-badge${episode.hasTranscript ? "" : " muted"}`}>
+              {episode.hasTranscript ? t("有字幕") : t("未转写")}
+            </span>
+          </span>
+          {episode.duration && episode.progress > 0 ? (
+            <span className="ph-progress" aria-hidden="true">
+              <span style={{ width: `${Math.min(100, Math.max(0, (episode.progress / episode.duration) * 100))}%` }} />
+            </span>
+          ) : null}
+        </span>
+        <ChevronRight className="ph-chevron" size={18} />
+      </button>
+    </li>
+  );
+}
+
+function EpisodesPage({ show, onOpenEpisode, onBack, onUnauthorized }: {
+  show: Show;
+  onOpenEpisode: (episodeId: string) => void;
+  onBack: () => void;
+  onUnauthorized: () => void;
+}) {
+  const [episodes, setEpisodes] = useState<Episode[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let live = true;
+    setEpisodes(null);
+    setError("");
+    (async () => {
+      try {
+        const list = await api.listEpisodes(show.id, 300);
+        if (live) setEpisodes(list);
+      } catch (e) {
+        if (!live) return;
+        if (e instanceof Unauthorized) { onUnauthorized(); return; }
+        setError(t("加载失败，请稍后再试"));
+      }
+    })();
+    return () => { live = false; };
+  }, [show.id, onUnauthorized]);
+
+  return (
+    <div className="phone ph-list-page">
+      <header className="ph-head ph-show-head">
+        <button className="ph-back" onClick={onBack} aria-label={t("返回")}>
+          <ChevronLeft size={20} />
+        </button>
+        <div className="ph-show-head-text">
+          <h1 className="ph-title sm">{show.title}</h1>
+          <p className="ph-muted ph-show-meta">{show.author ?? ""}</p>
+        </div>
+        {episodes && <span className="ph-muted ph-count">{t("{n} 集", { n: episodes.length })}</span>}
+      </header>
+      {error && <p className="ph-error">{error}</p>}
+      {episodes == null && !error && <p className="ph-muted ph-loading">{t("加载中…")}</p>}
+      {episodes != null && episodes.length === 0 && <p className="ph-muted ph-loading">{t("这档节目还没有单集。")}</p>}
+      {episodes != null && episodes.length > 0 && (
+        <ul className="ph-ep-rows">
+          {episodes.map((ep) => <EpisodeRow key={ep.id} episode={ep} onOpen={() => onOpenEpisode(ep.id)} />)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+type View =
+  | { kind: "shows" }
+  | { kind: "episodes"; show: Show }
+  | { kind: "episode"; show: Show; episodeId: string };
+
 export function PhoneApp() {
   const [paired, setPaired] = useState(() => !!deviceToken());
+  const [view, setView] = useState<View>({ kind: "shows" });
+
+  // 手机上的返回手势/浏览器返回键：每一层都记一条历史，回来时恢复那一层。
+  useEffect(() => {
+    const onPop = (e: PopStateEvent) => {
+      const restored = (e.state as { view?: View } | null)?.view;
+      setView(restored && restored.kind ? restored : { kind: "shows" });
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // 刷新页面后，当前这条历史记录还带着上一次的页面状态；页面本身总是从订阅列表开始，
+  // 所以把这条记录改回「订阅列表」，免得返回键把我们带回刷掉的那一层。
+  useEffect(() => {
+    if (!paired) return;
+    try { history.replaceState({ view: { kind: "shows" } }, ""); } catch { /* private mode */ }
+  }, [paired]);
+
+  const go = (next: View) => {
+    setView(next);
+    try { history.pushState({ view: next }, ""); } catch { /* private mode */ }
+  };
+  const back = () => { try { history.back(); } catch { setView({ kind: "shows" }); } };
+
   const pairedNow = () => {
     // 配对码别留在浏览历史里。
     try { history.replaceState(null, "", location.pathname); } catch { /* fine */ }
+    setView({ kind: "shows" });
     setPaired(true);
   };
-  return paired
-    ? <ShowsPage onUnpair={() => setPaired(false)} />
-    : <PairPage onPaired={pairedNow} />;
+  const unpair = () => { setDeviceToken(null); setView({ kind: "shows" }); setPaired(false); };
+
+  if (!paired) return <PairPage onPaired={pairedNow} />;
+  if (view.kind === "episodes") {
+    return (
+      <EpisodesPage
+        show={view.show}
+        onBack={back}
+        onOpenEpisode={(episodeId) => go({ kind: "episode", show: view.show, episodeId })}
+        onUnauthorized={unpair}
+      />
+    );
+  }
+  if (view.kind === "episode") {
+    return <EpisodePage episodeId={view.episodeId} onBack={back} onUnauthorized={unpair} />;
+  }
+  return <ShowsPage onUnpair={unpair} onOpenShow={(show) => go({ kind: "episodes", show })} />;
 }
